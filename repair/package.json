@@ -2,12 +2,14 @@
   "name": "gemini-web-repair",
   "version": "1.0.0",
   "private": true,
-  "description": "On-demand job that re-learns the gemini.google.com StreamGenerate protocol and hands it to the bridge",
+  "description": "On-demand jobs for the Gemini web bridge: learn page facts (learn) and answer prompts through the web UI (serve)",
   "type": "module",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "test": "node --test \"test/*.test.mjs\"",
-    "dry-run": "node run.mjs --dry-run --out learned.json"
+    "dry-run": "node run.mjs learn --dry-run --out facts.json"
   },
   "dependencies": {
     "playwright-core": "1.64.1"

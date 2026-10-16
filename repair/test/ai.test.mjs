@@ -1,7 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_AI_MODEL, ProposalError, buildAiPrompt, proposeSelectors, trimSummary, validateProposal } from '../ai.mjs';
-import { toPlaywrightCookies } from '../learn.mjs';
+import {
+  DEFAULT_AI_MODEL,
+  ProposalError,
+  buildAiPrompt,
+  buildAnswerPrompt,
+  proposeAnswerSelectors,
+  proposeSelectors,
+  trimSummary,
+  validateAnswerProposal,
+  validateProposal,
+} from '../ai.mjs';
+import { toPlaywrightCookies } from '../session.mjs';
 
 test('validateProposal accepts a good proposal and normalises an empty send selector to null', () => {
   assert.deepEqual(
@@ -93,4 +103,32 @@ test('toPlaywrightCookies keeps only google.com cookies and sets __Host- cookies
   assert.deepEqual(out[0], { name: 'SID', value: 'v1', secure: true, httpOnly: true, domain: '.google.com', path: '/' });
   assert.deepEqual(out[1], { name: '__Host-GAPS', value: 'v2', secure: true, httpOnly: false, url: 'https://accounts.google.com/' });
   assert.equal(out[2].domain, '.google.com');
+});
+
+test('validateAnswerProposal accepts a good proposal and rejects unusable ones', () => {
+  assert.deepEqual(validateAnswerProposal({ answer_selector: ' model-response .markdown ', stop_selector: '', notes: 'ok' }), {
+    answer_selector: 'model-response .markdown',
+    stop_selector: null,
+    notes: 'ok',
+  });
+  for (const bad of [null, {}, { answer_selector: '' }, { answer_selector: 'text=Answer' }, { answer_selector: 'a', stop_selector: '//button' }, { answer_selector: 'a\nb' }]) {
+    assert.throws(() => validateAnswerProposal(bad), ProposalError, JSON.stringify(bad));
+  }
+});
+
+test('buildAnswerPrompt embeds the outline as data and names the wanted fields', () => {
+  const p = buildAnswerPrompt({ elements: [{ tag: 'model-response', text_len: 12 }] });
+  assert.match(p, /answer_selector/);
+  assert.match(p, /stop_selector/);
+  assert.match(p, /"tag":"model-response"/);
+});
+
+test('proposeAnswerSelectors uses the answer schema and the same key handling', async () => {
+  const { calls, fetchImpl } = fakeGemini(() => ok(JSON.stringify({ answer_selector: 'my-answer', stop_selector: 'button.halt', notes: 'n' })));
+  const res = await proposeAnswerSelectors({ elements: [] }, { apiKey: 'KEY-12345678', fetchImpl });
+  assert.deepEqual(res, { answer_selector: 'my-answer', stop_selector: 'button.halt', notes: 'n' });
+  assert.deepEqual(calls[0].body.generationConfig.responseSchema.required, ['answer_selector', 'stop_selector', 'notes']);
+  assert.equal(calls[0].init.headers['x-goog-api-key'], 'KEY-12345678');
+  assert.ok(!JSON.stringify(calls[0].body).includes('KEY-12345678'));
+  await assert.rejects(proposeAnswerSelectors({}, { apiKey: '' }), /not set/);
 });

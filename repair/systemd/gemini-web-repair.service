@@ -1,14 +1,13 @@
 [Unit]
-Description=Gemini web bridge self-repair (starts the repair container only when the canary fails)
+Description=Gemini web bridge self-repair (learn job and browser transport, only while the canary fails)
 Wants=docker.service
 After=docker.service network-online.target
 
 [Service]
 Type=oneshot
-EnvironmentFile=/etc/gemini-web-repair.env
-ExecStart=/opt/gemini-web2api/repair/systemd/check-and-repair.sh
-# The container needs a minute or two for Chromium plus the bridge's own validation canary.
-TimeoutStartSec=300
-# 2 = learned but not validated by the bridge; the event log already records it.
-SuccessExitStatus=2
+EnvironmentFile=/etc/miraz/gemini-web-repair.env
+ExecStart=/usr/bin/env bash /opt/miraz/deploy/vps/gemini-web/repair/check-and-repair.sh
+# A failing canary means: learn job (a minute or two), up to RECHECK_WAIT_S (180 s) of waiting
+# for the bridge's re-check, then starting the browser container.
+TimeoutStartSec=900
 Nice=10
