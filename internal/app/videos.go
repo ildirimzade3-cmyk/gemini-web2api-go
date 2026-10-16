@@ -10,6 +10,7 @@ package app
 // 只是把「阻塞等结果」挪到后台 goroutine，前台立即返 id。
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -105,9 +106,9 @@ func runVideoJob(j *videoJob) {
 		finishVideoJob(j, nil, "", err.Error())
 		return
 	}
-	_, _, res, err := callGemini(j.Prompt, j.Prompt, mc, nil, nil, nil, nil)
+	_, _, res, err := callGemini(context.Background(), j.Prompt, j.Prompt, mc, nil, nil, nil, nil)
 	if err != nil {
-		recordRequest("videos", j.Model, j.Prompt, "", res, 502, err.Error(), false)
+		recordRequest("videos", j.Model, j.Prompt, "", res, apiErrorFor(err).Status, err.Error(), false)
 		finishVideoJob(j, nil, "", err.Error())
 		return
 	}

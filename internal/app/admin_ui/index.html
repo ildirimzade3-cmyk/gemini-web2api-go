@@ -927,7 +927,10 @@ const RT_GROUPS = [
       { k: 'retry_attempts', label: '重试次数', type: 'int', min: 1, max: 10,
         hint: '含首次；流式已吐字后不再重试' },
       { k: 'retry_delay_sec', label: '重试间隔（秒）', type: 'int', min: 0, max: 60 },
-      { k: 'request_timeout_sec', label: '上游超时（秒）', type: 'int', min: 5, max: 600 },
+      { k: 'request_timeout_sec', label: '控制请求超时（秒）', type: 'int', min: 5, max: 600,
+        hint: '只约束页面抓取（XSRF / bl）、cookie 轮转、上传、媒体下载这类小请求。对话生成没有客户端超时：Google 想多久就多久，客户端断开会取消上游调用，另有一个 600 秒的死连接保险' },
+      { k: 'canary_interval_min', label: 'Canary 间隔（分钟）', type: 'int', min: 0, max: 1440,
+        hint: '每隔多久用一条固定小 prompt 走正常路径探一次，结果进 /healthz 和事件日志。0=不探（仍可手动 POST /admin/api/canary）' },
     ],
   },
   {
@@ -1057,8 +1060,10 @@ async function saveRtCfg() {
 }
 
 const ERR_BADGE = {
-  upstream_rejected: 'muted', rate_limited_local: 'muted', bad_request: 'muted',
+  upstream_rejected: 'muted', rate_limited_local: 'muted', bad_request: 'muted', client_closed: 'muted',
   blocked_sorry: 'fail', upstream_429: 'fail', upstream_http_error: 'fail', network: 'fail',
+  upstream_rate_limited: 'fail', no_valid_account: 'fail', upstream_protocol_changed: 'fail',
+  upstream_timeout: 'fail',
 };
 const ERR_DESC = {
   upstream_rejected: '上游返回 200 但没有内容帧。实测是瞬时拒绝，隔几分钟自愈，跟频率/并发/累积次数都无关 —— 重试即可，不用调限流。',
@@ -1068,6 +1073,12 @@ const ERR_DESC = {
   upstream_http_error: '上游返回非 200 的其它状态码，可能是协议变更或临时故障。',
   network: '连不上代理 / DNS / TLS 握手失败。检查代理可用性 —— 实测代理服务商出口质量参差，劣质出口会连续失败。',
   bad_request: '客户端请求本身有问题（模型名不存在、传了不支持的字段）。',
+  upstream_rate_limited: '上游响应里带 quota / usage limit / RESOURCE_EXHAUSTED 字样（非 429 状态码）。客户端收到 429 + Retry-After，等一等再试。',
+  no_valid_account: '没有可用的 cookie（账号全被停用/过期，或取不到 XSRF）。到「Cookie 池」检测或换号。客户端收到 503 no_valid_account。',
+  upstream_protocol_changed: 'Google 回了但格式对不上（400 / 404 / 帧解析失败）。已自动重抓一次 bl；仍失败说明协议变了，看 GET /admin/api/events 里的 protocol_parse_failure。',
+  client_closed: '客户端自己断开了连接，上游调用已随之取消。不是上游的问题。',
+  upstream_timeout: '一次生成超过 600 秒的死连接保险。几乎一定是连接卡死，不是模型想得久。',
+
 };
 
 function escapeHtml(s) {

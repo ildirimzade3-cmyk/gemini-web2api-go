@@ -10,7 +10,7 @@ import (
 // 先 delta{role} → 若干 delta{content} → delta{} + finish_reason → 可选 usage → [DONE]。
 //
 // header 是懒发的：第一次真要写 chunk 时才 WriteHeader(200)。这样上游在出第一个
-// 字之前就失败的话，还能退回正常的 502 JSON，而不是留给客户端半个流。
+// 字之前就失败的话，还能退回带分类的错误 JSON（429 / 503，见 upstream_error.go），而不是留给客户端半个流。
 type sseWriter struct {
 	w       http.ResponseWriter
 	flusher http.Flusher
@@ -126,14 +126,17 @@ func (s *sseWriter) Finish(reason string, usage map[string]int) {
 }
 
 // Fail 在已经开流之后出错时用：发一个带 error 的 chunk 再收尾。
-// 此时 HTTP 状态码已经是 200，改不了了。
-func (s *sseWriter) Fail(err error) {
+// 此时 HTTP 状态码已经是 200，改不了了，所以 class 放在 error.code 里
+// （跟非流式错误体同一套 type/code）。
+func (s *sseWriter) Fail(ae apiError) {
 	s.start()
 	c := map[string]interface{}{
 		"id": s.id, "object": "chat.completion.chunk",
 		"created": s.created, "model": s.model,
 		"choices": []map[string]interface{}{},
-		"error":   map[string]string{"message": err.Error(), "type": "upstream_error"},
+		"error": map[string]interface{}{
+			"message": ae.Message, "type": ae.Type, "code": ae.Code, "retry_after": ae.RetryAfter,
+		},
 	}
 	b, _ := json.Marshal(c)
 	fmt.Fprintf(s.w, "data: %s\n\n", b)

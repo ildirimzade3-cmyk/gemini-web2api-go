@@ -506,6 +506,9 @@ func autoDisableIfDead(id int64) {
 	if _, err := getDB().Exec(
 		`UPDATE accounts SET status='disabled' WHERE id=? AND status='enabled'`, id); err == nil {
 		logf("[cookie] 账号 #%d 连续 %d 次鉴权失败，已自动停用", id, fails)
+		// By id only: account labels are usually e-mail addresses.
+		LogEvent(EventAccountDisabled, fmt.Sprintf("account #%d disabled after %d consecutive auth failures", id, fails))
+
 	}
 }
 
@@ -667,4 +670,15 @@ func updateAccountCookie(id int64, cookie string) {
 		}
 	}
 	_, _ = getDB().Exec(`UPDATE accounts SET cookie=? WHERE id=?`, cookie, id)
+}
+
+// accountHealthCounts returns (total, enabled, healthy) account counts for
+// /healthz. Healthy = enabled with no consecutive failures (fail_count resets on
+// success).
+func accountHealthCounts() (total, enabled, healthy int) {
+	_ = getDB().QueryRow(`SELECT COUNT(*),
+		COALESCE(SUM(CASE WHEN status='enabled' THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN status='enabled' AND fail_count=0 THEN 1 ELSE 0 END),0)
+		FROM accounts`).Scan(&total, &enabled, &healthy)
+	return
 }

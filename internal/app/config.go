@@ -52,6 +52,8 @@ type Config struct {
 	// RPC）。只登录态有意义（匿名本就不落账号）。与 multi_turn 冲突：multi_turn 开着时不发，
 	// 见 temporaryChatEligible。默认 false。
 	TemporaryChat bool `json:"temporary_chat"`
+	// 调度器多久用一条固定小 prompt 走正常路径探一次（分钟），0 = 不探。默认 30。见 health.go。
+	CanaryIntervalMin int `json:"canary_interval_min"`
 }
 
 var (
@@ -94,6 +96,7 @@ func defaultConfig() Config {
 		AutoDeleteConversation: false,
 		AnonFirst:              false,
 		TemporaryChat:          false,
+		CanaryIntervalMin:      30,
 	}
 }
 

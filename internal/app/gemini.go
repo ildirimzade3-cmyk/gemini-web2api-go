@@ -3,7 +3,9 @@ package app
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -184,8 +186,8 @@ func resolveModel(modelName string) (string, ModelConfig, error) {
 			if full.Tool > 0 {
 				downgrade = "are silently downgraded to a plain \"Are you signed in?\" text reply"
 			}
-			return "", ModelConfig{}, fmt.Errorf(
-				"%s is unavailable without a Google account cookie: anonymous requests for it "+
+			return "", ModelConfig{}, errNoAccount(
+				"no valid account: %s is unavailable without a Google account cookie: anonymous requests for it "+
 					"%s. Add a cookie in the admin panel (Cookie pool) or via --cookie-file to enable it",
 				modelName, downgrade)
 		}
@@ -309,9 +311,9 @@ func (d *deltaTracker) Push(fullText string) string {
 // onDelta 非 nil 时开启真流式：上游每写一帧就解析一次，跟已发出的内容做前缀
 // diff，把新增部分立刻回调出去。上游每帧带的是累积全文而不是增量，diff 必须
 // 自己做。一旦已经吐过内容就不再重试——重试会让客户端收到重复文本。
-func streamGenerate(prompt, latest string, mc ModelConfig,
+func streamGenerate(ctx context.Context, prompt, latest string, mc ModelConfig,
 	onDelta, onReasoning func(string)) (*StreamResult, error) {
-	return streamGenerateWithFiles(prompt, latest, mc, nil, onDelta, onReasoning)
+	return streamGenerateWithFiles(ctx, prompt, latest, mc, nil, onDelta, onReasoning)
 }
 
 // fileRef 是一个已上传附件的引用。
@@ -326,9 +328,15 @@ type fileRef struct {
 //
 // 附件填 inner[0][3]，形状 [[[ref, 1], "文件名"], …]。附件只在登录态可用：
 // 匿名能把文件传上去，但对话里一引用就被服务端回 1100。
-func streamGenerateWithFiles(prompt, latest string, mc ModelConfig, pending []pendingUpload,
+func streamGenerateWithFiles(ctx context.Context, prompt, latest string, mc ModelConfig, pending []pendingUpload,
 	onDelta, onReasoning func(string)) (*StreamResult, error) {
 	var files []fileRef
+
+	// One ceiling for the whole generation, retries included: a dead-connection
+	// guard only. Google's thinking/writing time is otherwise unbounded, apart
+	// from the inbound request context (client disconnect cancels the call).
+	genCtx, cancelGen := context.WithTimeout(ctx, generationCeiling)
+	defer cancelGen()
 
 	// 先挑号，再按它上次绑的出口挑代理 —— 同一个账号要尽量固定从同一个 IP 出去，
 	// 否则一个号在几十个出口之间跳，在 Google 眼里就是账号共享的特征。
@@ -376,10 +384,6 @@ func streamGenerateWithFiles(prompt, latest string, mc ModelConfig, pending []pe
 	// endpoint 要等出口定下来才能拼：currentBL 可能顺手踢一次后台抓取，
 	// 那个抓取必须跟正式请求走同一个出口，否则配了代理池也会从本机 IP 漏一次。
 	reqid := time.Now().Unix() % 1000000
-	endpoint := fmt.Sprintf(
-		"https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?bl=%s&hl=en&_reqid=%d&rt=c",
-		currentBL(proxyURL), reqid,
-	)
 
 	// 取 XSRF token。一个 cookie 失效不该让整个请求失败：当前号取不到就换下一个，
 	// 最多试 maxCookieTries 个。不这么做的话，池子里 2 个号坏 1 个就会让大约一半
@@ -442,9 +446,7 @@ func streamGenerateWithFiles(prompt, latest string, mc ModelConfig, pending []pe
 			// 默认报错而不是降级：cookie 失效后上游不会拒绝，只是把你当匿名用户，
 			// 纯文本请求照样 200 —— 于是 3.1 Pro 被静默降级成 3.5 Flash-Lite、
 			// 思考链消失，客户端完全看不出来。宁可明确失败也不给假的成功。
-			return attrib(fmt.Errorf("cookie 池里 %d 个账号都不可用（最后一个：%w）；"+
-				"到面板「Cookie 池」用「检测」按钮逐个排查，或打开 fallback_anon 降级匿名",
-				len(tried), lastCookieErr))
+			return attrib(cookieExhaustedError(len(tried), lastCookieErr))
 		}
 		logf("[cookie] 试过的 %d 个账号都不可用，本次降级匿名（能力会退化到匿名档）", len(tried))
 		cookieID, cookieLabel = 0, ""
@@ -452,10 +454,11 @@ func streamGenerateWithFiles(prompt, latest string, mc ModelConfig, pending []pe
 	// 图片附件：上传要 cookie，而且必须走跟正式请求同一个出口，所以排在这里。
 	if len(pending) > 0 {
 		if cookieStr == "" {
-			return attrib(fmt.Errorf("image input needs a Google account cookie: " +
+			return attrib(errNoAccount("no valid account: image input needs a Google account cookie: " +
 				"anonymous uploads succeed but referencing them in a conversation is " +
 				"rejected upstream. Add a cookie in the admin panel (Cookie pool)"))
 		}
+
 		nImg, nVid := 0, 0
 		for _, u := range pending {
 			ref, uerr := uploadBytes(cookieStr, proxyURL, u.Data, u.Name)
@@ -594,6 +597,8 @@ func streamGenerateWithFiles(prompt, latest string, mc ModelConfig, pending []pe
 	// cookie 健康度只认 401/403，别的状态不算 cookie 的错，见 markCookieByStatus。
 	lastStatus := 0
 	xsrfRetried := false // XSRF 自愈只做一次，避免死循环
+	blRetried := false   // stale-bl 自愈（强制重抓 bl）同样一次
+
 	t0 := time.Now()
 
 	tracker := &deltaTracker{}
@@ -621,15 +626,21 @@ func streamGenerateWithFiles(prompt, latest string, mc ModelConfig, pending []pe
 	}
 
 	for attempt := 0; attempt < rtCfg().RetryAttempts; attempt++ {
-		statusCode, raw, ttfb, setCookie, err := doGeminiRequest(endpoint, body, geminiHeaders, proxyURL, lineCB)
-		if len(setCookie) > 0 && cookieID > 0 {
-			if merged := mergeSetCookie(cookieStr, setCookie); merged != cookieStr {
+		// The endpoint is rebuilt per attempt so a bl refreshed meanwhile is picked up.
+		r, err := doGeminiRequest(genCtx, geminiEndpoint(currentBL(proxyURL), reqid),
+			body, geminiHeaders, proxyURL, lineCB)
+		if len(r.SetCookie) > 0 && cookieID > 0 {
+			if merged := mergeSetCookie(cookieStr, r.SetCookie); merged != cookieStr {
 				cookieStr = merged
 				updateAccountCookie(cookieID, merged)
 			}
 		}
 		if err != nil {
-			lastErr = err
+			// The client went away (or the safety ceiling hit): stop, nothing to retry.
+			if cerr := generationCtxError(ctx, genCtx); cerr != nil {
+				return attrib(cerr)
+			}
+			lastErr = classifyTransportError(genCtx, "request to Gemini failed", err)
 			if pickedOK {
 				recordProxyResult(picked.ID, false, err.Error())
 			}
@@ -639,61 +650,66 @@ func streamGenerateWithFiles(prompt, latest string, mc ModelConfig, pending []pe
 			}
 			if attempt < rtCfg().RetryAttempts-1 {
 				logf("retry %d/%d: %v", attempt+1, rtCfg().RetryAttempts, err)
-				time.Sleep(time.Duration(rtCfg().RetryDelaySec) * time.Second)
+				if !sleepCtx(genCtx, time.Duration(rtCfg().RetryDelaySec)*time.Second) {
+					return attrib(generationCtxError(ctx, genCtx))
+				}
 			}
 			continue
 		}
-		if statusCode != 200 {
-			// token 过期时上游回 400 + xsrf。作废缓存重取一次再打，
-			// 这种自愈不算进重试预算，否则一次过期就吃掉全部重试。
-			if statusCode == 400 && isXSRFError(string(raw)) && cookieStr != "" && !xsrfRetried {
-				xsrfRetried = true
-				invalidateXSRF(cookieStr)
-				if tok, e := getXSRF(cookieStr, proxyURL); e == nil {
-					body = buildBody(tok)
-					geminiHeaders = buildGeminiHeaders(cookieStr, sapisid, mc.HexID)
-					geminiHeaders["x-goog-ext-525001261-jspb"] = modelHeader
-					geminiHeaders["x-goog-ext-525005358-jspb"] = sessionHeader
+		// token 过期时上游回 400 + xsrf。作废缓存重取一次再打，
+		// 这种自愈不算进重试预算，否则一次过期就吃掉全部重试。
+		if r.Status == 400 && isXSRFError(string(r.Raw)) && cookieStr != "" && !xsrfRetried {
+			xsrfRetried = true
+			invalidateXSRF(cookieStr)
+			if tok, e := getXSRF(cookieStr, proxyURL); e == nil {
+				body = buildBody(tok)
+				geminiHeaders = buildGeminiHeaders(cookieStr, sapisid, mc.HexID)
+				geminiHeaders["x-goog-ext-525001261-jspb"] = modelHeader
+				geminiHeaders["x-goog-ext-525005358-jspb"] = sessionHeader
+				attempt--
+				continue
+			}
+		}
+		// Non-200, or HTTP 200 without any content frame. The latter is the
+		// upstream's transient rejection (the 1155 in the response): not a rate
+		// limit — a clean IP fired 15x at 1 s intervals all passed and there is no
+		// predictable threshold — so it is retried like any other failure, otherwise
+		// one hiccup becomes a client-visible error. The criterion is the absence of
+		// a content frame, not BardErrorInfo: normal responses carry an error code in
+		// their closing frame too (1096 = conversation not persisted).
+		if verdict := judgeAttempt(r, cookieStr != ""); verdict != nil {
+			lastErr = verdict
+			if r.Status != 200 {
+				lastStatus = r.Status
+			}
+			noteProtocolFailure(verdict)
+			if pickedOK {
+				// 记进代理健康度：1155 跟出口质量强相关（干净出口 60+ 次 0 发生，
+				// 脏出口一天约 9 次），连续踩中说明这个出口该歇了。
+				recordProxyResult(picked.ID, false, verdict.Error())
+			}
+			if tracker.emitted != "" || rtracker.emitted != "" {
+				break
+			}
+			// An unexplained 400 / unparseable frames are what a stale bl looks like:
+			// re-scrape it once (5-minute floor) and retry without spending an attempt.
+			if verdict.Class == ClassProtocolChanged && !blRetried {
+				blRetried = true
+				if forceRefreshBL(proxyURL) {
+					logf("[bl] 协议类失败后 bl 已变化，立即重试一次")
 					attempt--
 					continue
 				}
 			}
-			lastErr = fmt.Errorf("upstream HTTP %d: %s", statusCode, truncate(string(raw), 200))
-			lastStatus = statusCode
-			if pickedOK {
-				recordProxyResult(picked.ID, false, lastErr.Error())
-			}
-			if tracker.emitted != "" || rtracker.emitted != "" {
-				break
-			}
 			if attempt < rtCfg().RetryAttempts-1 {
-				time.Sleep(time.Duration(rtCfg().RetryDelaySec) * time.Second)
+				logf("retry %d/%d: %v", attempt+1, rtCfg().RetryAttempts, verdict)
+				if !sleepCtx(genCtx, time.Duration(rtCfg().RetryDelaySec)*time.Second) {
+					return attrib(generationCtxError(ctx, genCtx))
+				}
 			}
 			continue
 		}
-		// HTTP 200 但一个内容帧都没有 —— 上游的瞬时拒绝（响应里那个 1155）。
-		// 它不是限流：干净 IP 间隔 1s 连打 15 次全过、同 IP 并发 10 共 18 次全过、
-		// 打了 60+ 次的 IP 之后照样成功，没有可预测阈值，同样的请求有时成功有时失败。
-		// 重发一次通常就好，所以必须纳入重试——不然一次抖动就变成客户端可见的 502。
-		//
-		// 判据是**有没有内容帧**，不是 BardErrorInfo：正常响应的结束帧里也带错误码
-		// （1096 = 会话未持久化），拿它判错会把每个正常响应都判成失败。
-		if !hasContentFrame(string(raw)) {
-			lastErr = fmt.Errorf("upstream returned no content frame (raw %d bytes)", len(raw))
-			if pickedOK {
-				// 记进代理健康度：1155 跟出口质量强相关（干净出口 60+ 次 0 发生，
-				// 脏出口一天约 9 次），连续踩中说明这个出口该歇了。
-				recordProxyResult(picked.ID, false, lastErr.Error())
-			}
-			if tracker.emitted != "" || rtracker.emitted != "" {
-				break
-			}
-			if attempt < rtCfg().RetryAttempts-1 {
-				logf("retry %d/%d: 空响应（无内容帧，%d 字节）", attempt+1, rtCfg().RetryAttempts, len(raw))
-				time.Sleep(time.Duration(rtCfg().RetryDelaySec) * time.Second)
-			}
-			continue
-		}
+		raw, ttfb := r.Raw, r.TTFBMs
 		if pickedOK {
 			recordProxyResult(picked.ID, true, "")
 		}
@@ -812,56 +828,147 @@ func buildGeminiHeaders(cookieStr, sapisid, hexID string) map[string]string {
 	return h
 }
 
+// geminiHTTPResult is one finished StreamGenerate attempt. It is always non-nil
+// from doGeminiRequest; on a transport error only the fields received so far are set.
+type geminiHTTPResult struct {
+	Status     int
+	Raw        []byte
+	TTFBMs     int64
+	SetCookie  []string
+	Location   string // redirect target; "/sorry" here is the bot block
+	RetryAfter string // Retry-After response header, verbatim
+}
+
+// geminiEndpoint builds the StreamGenerate URL for a given bl and request id.
+func geminiEndpoint(bl string, reqid int64) string {
+	return fmt.Sprintf(
+		"%s/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?bl=%s&hl=en&_reqid=%d&rt=c",
+		geminiBaseURL, bl, reqid)
+}
+
 // doGeminiRequest 发一次请求到 endpoint。proxyURL 非空走 stdlib（支持 socks5/http），
-// 空走 tls-client（chrome146 真指纹）。返回 (HTTP status, body bytes, err)。
-// 返回值多了 setCookie：服务端几乎每个响应都在刷新 SIDCC / __Secure-1PSIDCC /
+// 空走 tls-client（chrome146 真指纹）。两条路都用"生成"client：没有总超时，
+// 只受 ctx 约束（客户端断开 / generationCeiling 到点都会取消这次上游调用）。
+// 返回值带 Set-Cookie：服务端几乎每个响应都在刷新 SIDCC / __Secure-1PSIDCC /
 // __Secure-3PSIDCC，浏览器收下再带回去。一直发旧值的客户端会被判定为过期会话，
 // 实测号活一两小时就失效 —— 所以这些必须收下来并写回账号。
-func doGeminiRequest(endpoint, body string, headers map[string]string, proxyURL string,
-	onLine func(string)) (int, []byte, int64, []string, error) {
+func doGeminiRequest(ctx context.Context, endpoint, body string, headers map[string]string, proxyURL string,
+	onLine func(string)) (*geminiHTTPResult, error) {
 	sendAt := time.Now()
+	out := &geminiHTTPResult{}
 	if proxyURL != "" {
 		// 走 stdlib 的 http.ProxyURL，已知能过 socks5/socks5h。
-		req, err := http.NewRequest("POST", endpoint, strings.NewReader(body))
+		req, err := http.NewRequestWithContext(ctx, "POST", endpoint, strings.NewReader(body))
 		if err != nil {
-			return 0, nil, 0, nil, err
+			return out, err
 		}
 		applyChromeHeaders(req)
 		for k, v := range headers {
 			req.Header.Set(k, v)
 		}
-		client := getStdlibClient(proxyURL)
-		resp, err := client.Do(req)
+		resp, err := getStdlibGenClient(proxyURL).Do(req)
 		if err != nil {
-			return 0, nil, 0, nil, err
+			return out, err
 		}
 		defer resp.Body.Close()
-		raw, ttfb, err := readBody(resp.Body, onLine, sendAt)
-		if err != nil {
-			return resp.StatusCode, nil, ttfb, resp.Header.Values("Set-Cookie"), err
-		}
-		return resp.StatusCode, raw, ttfb, resp.Header.Values("Set-Cookie"), nil
+		out.Status = resp.StatusCode
+		out.SetCookie = resp.Header.Values("Set-Cookie")
+		out.Location = resp.Header.Get("Location")
+		out.RetryAfter = resp.Header.Get("Retry-After")
+		out.Raw, out.TTFBMs, err = readBody(resp.Body, onLine, sendAt)
+		return out, err
 	}
 
 	// 直连 → tls-client，保留 chrome146 TLS/HTTP2 真指纹
-	req, err := fhttp.NewRequest("POST", endpoint, strings.NewReader(body))
+	req, err := fhttp.NewRequestWithContext(ctx, "POST", endpoint, strings.NewReader(body))
 	if err != nil {
-		return 0, nil, 0, nil, err
+		return out, err
 	}
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	client := getTLSClient()
-	resp, err := client.Do(req)
+	resp, err := getTLSGenClient().Do(req)
 	if err != nil {
-		return 0, nil, 0, nil, err
+		return out, err
 	}
 	defer resp.Body.Close()
-	raw, ttfb, err := readBody(resp.Body, onLine, sendAt)
-	if err != nil {
-		return resp.StatusCode, nil, ttfb, resp.Header.Values("Set-Cookie"), err
+	out.Status = resp.StatusCode
+	out.SetCookie = resp.Header.Values("Set-Cookie")
+	out.Location = resp.Header.Get("Location")
+	out.RetryAfter = resp.Header.Get("Retry-After")
+	out.Raw, out.TTFBMs, err = readBody(resp.Body, onLine, sendAt)
+	return out, err
+}
+
+// judgeAttempt turns one finished attempt into a verdict: nil means a usable
+// answer, otherwise the classified failure. signedIn says the request carried a
+// login cookie.
+func judgeAttempt(r *geminiHTTPResult, signedIn bool) *UpstreamError {
+	if r.Status != http.StatusOK {
+		return classifyHTTPFailure(r.Status, string(r.Raw), r.Location, r.RetryAfter, signedIn)
 	}
-	return resp.StatusCode, raw, ttfb, resp.Header.Values("Set-Cookie"), nil
+	if !hasContentFrame(string(r.Raw)) {
+		return classifyEmptyAnswer(r.Raw)
+	}
+	return nil
+}
+
+// noteProtocolFailure records Google-protocol failures in the event log
+// (throttled: it can fire on every request while the protocol is broken).
+func noteProtocolFailure(ue *UpstreamError) {
+	if ue != nil && ue.Class == ClassProtocolChanged {
+		logEventThrottled(EventProtocolParseFail, ue.Error(), time.Minute)
+	}
+}
+
+// generationCtxError reports why a generation was cut off by its context, or
+// nil when the context is fine. A gone client (parent canceled) is returned as is;
+// the safety ceiling is an upstream failure.
+func generationCtxError(parent, gen context.Context) error {
+	if err := parent.Err(); err != nil {
+		return err
+	}
+	if gen.Err() != nil {
+		return newUpstreamError(ClassUnavailable, 0,
+			"upstream generation exceeded the %s safety ceiling (dead-connection guard)", generationCeiling)
+	}
+	return nil
+}
+
+// sleepCtx sleeps for d, returning false as soon as ctx is done.
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
+// cookieExhaustedError is the error when every tried cookie account failed to
+// yield a login token. The class follows the last failure: an expired cookie is
+// no_valid_account, but if the token page itself was unreachable or throttled the
+// pool is not to blame.
+func cookieExhaustedError(tried int, last error) *UpstreamError {
+	ue := &UpstreamError{Class: ClassNoAccount, Err: last}
+	var inner *UpstreamError
+	if errors.As(last, &inner) {
+		ue.Class, ue.Status, ue.RetryAfter = inner.Class, inner.Status, inner.RetryAfter
+	} else if last != nil {
+		ue.Class = ClassUnavailable
+	}
+	lead := "no valid account"
+	if ue.Class != ClassNoAccount {
+		lead = "login token unobtainable"
+	}
+	ue.Detail = fmt.Sprintf("%s: %d cookie account(s) tried, none usable (last: %v); "+
+		"check the Cookie pool in the admin panel or enable fallback_anon", lead, tried, last)
+	return ue
 }
 
 // readBody 读完整个响应体并原样返回；onLine 非 nil 时每读到一行就回调一次，

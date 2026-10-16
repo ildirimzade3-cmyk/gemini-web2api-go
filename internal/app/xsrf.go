@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	fhttp "github.com/bogdanfinn/fhttp"
@@ -31,6 +32,31 @@ type xsrfEntry struct {
 	pushID  string // 上传文件用的 Push-ID 头
 	pctx    string // 上传文件用的 X-Client-Pctx 头
 	fetched time.Time
+}
+
+// xsrfLastState is the outcome of the most recent login-token fetch, for /healthz:
+// 0 = none yet, 1 = ok, 2 = failed.
+var xsrfLastState atomic.Int32
+
+func recordXSRFResult(err error) {
+	if err == nil {
+		xsrfLastState.Store(1)
+	} else {
+		xsrfLastState.Store(2)
+	}
+}
+
+// xsrfLastOK reports the most recent token fetch outcome; nil = no fetch yet.
+func xsrfLastOK() *bool {
+	switch xsrfLastState.Load() {
+	case 1:
+		t := true
+		return &t
+	case 2:
+		f := false
+		return &f
+	}
+	return nil
 }
 
 // 页面上的 token 没写明有效期，取个保守值定期重取。
@@ -75,6 +101,7 @@ func getXSRF(cookie, proxyURL string) (string, error) {
 	xsrfMu.Unlock()
 
 	e, err := fetchAppTokens(cookie, proxyURL)
+	recordXSRFResult(err)
 	if err != nil {
 		return "", err
 	}
@@ -96,6 +123,7 @@ func getUploadTokens(cookie, proxyURL string) (pushID, pctx string, err error) {
 	xsrfMu.Unlock()
 
 	e, err := fetchAppTokens(cookie, proxyURL)
+	recordXSRFResult(err)
 	if err != nil {
 		return "", "", err
 	}
@@ -110,7 +138,8 @@ func getUploadTokens(cookie, proxyURL string) (pushID, pctx string, err error) {
 // 免得页面里取到的 token 和后续请求来自两个不同 IP。
 // cookie 传空串就是匿名抓（页面照样返回，只是没有登录态字段）。
 func fetchAppPage(cookie, proxyURL string) ([]byte, error) {
-	const pageURL = "https://gemini.google.com/app"
+	pageURL := geminiBaseURL + "/app"
+
 	headers := map[string]string{
 		"Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 		"Accept-Language": "en-US,en;q=0.9",
@@ -131,15 +160,16 @@ func fetchAppPage(cookie, proxyURL string) ([]byte, error) {
 		}
 		resp, err := getStdlibClient(proxyURL).Do(req)
 		if err != nil {
-			return nil, err
+			return nil, errUnavailable("fetch /app", err)
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != 200 {
-			return nil, fmt.Errorf("fetch /app: HTTP %d", resp.StatusCode)
+			return nil, appPageStatusError(resp.StatusCode, resp.Header.Get("Location"),
+				resp.Header.Get("Retry-After"), cookie != "")
 		}
 		body, err = io.ReadAll(resp.Body)
 		if err != nil {
-			return nil, err
+			return nil, errUnavailable("fetch /app", err)
 		}
 	} else {
 		req, err := fhttp.NewRequest("GET", pageURL, nil)
@@ -151,18 +181,30 @@ func fetchAppPage(cookie, proxyURL string) ([]byte, error) {
 		}
 		resp, err := getTLSClient().Do(req)
 		if err != nil {
-			return nil, err
+			return nil, errUnavailable("fetch /app", err)
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != 200 {
-			return nil, fmt.Errorf("fetch /app: HTTP %d", resp.StatusCode)
+			return nil, appPageStatusError(resp.StatusCode, resp.Header.Get("Location"),
+				resp.Header.Get("Retry-After"), cookie != "")
 		}
 		body, err = io.ReadAll(resp.Body)
 		if err != nil {
-			return nil, err
+			return nil, errUnavailable("fetch /app", err)
 		}
 	}
 	return body, nil
+}
+
+// appPageStatusError classifies a non-200 answer to the /app page fetch. The
+// "HTTP <code>" text stays in the message: explainCookieFailure matches on it.
+func appPageStatusError(status int, location, retryAfter string, signedIn bool) error {
+	ue := classifyHTTPFailure(status, "", location, retryAfter, signedIn)
+	ue.Detail = fmt.Sprintf("fetch /app: HTTP %d", status)
+	if strings.Contains(strings.ToLower(location), "/sorry") {
+		ue.Detail += " (redirected to sorry)"
+	}
+	return ue
 }
 
 // fetchAppTokens 抓一次 /app 页面，把三个 token 一起抠出来。
@@ -176,7 +218,7 @@ func fetchAppTokens(cookie, proxyURL string) (xsrfEntry, error) {
 		e.token = string(m[1])
 	} else if cookie != "" {
 		// 带 cookie 却拿不到 token = cookie 已失效被当成匿名。匿名本就没这字段，不算错。
-		return xsrfEntry{}, fmt.Errorf("no SNlM0e in page (cookie expired or not signed in)")
+		return xsrfEntry{}, errNoAccount("no SNlM0e in page (cookie expired or not signed in)")
 	}
 	if p := pushIDRe.FindSubmatch(body); p != nil {
 		e.pushID = string(p[1])

@@ -558,7 +558,7 @@ docker-compose.yml         single container, pulls the ghcr image by default, sq
 | Every request times out | This host can't reach `gemini.google.com` | Configure a proxy (panel or `--proxy`). Note that **`HTTPS_PROXY` is not read** |
 | Exits at startup with `unable to open database file (14)` | The container runs as nonroot (uid 65532) but the bind-mounted host directory is owned by root, so it can't be written | Use a named volume (the default in compose), or `sudo chown -R 65532:65532 ./data` |
 | `gemini-3.1-pro` errors out immediately | It isn't exposed without a cookie, by design | Add an account on the Cookie pool page and it becomes available |
-| Every request returns 502 after attaching a cookie | The cookie expired, so the XSRF token can't be fetched | Re-export the cookie. Quick check: if `gemini-3.1-pro` reports 3.5 Flash-Lite, it's expired |
+| Every request returns 503 `no_valid_account` after attaching a cookie | The cookie expired, so the XSRF token can't be fetched | Re-export the cookie. Quick check: if `gemini-3.1-pro` reports 3.5 Flash-Lite, it's expired |
 | Cookie dies in about 30 minutes; keepalive does nothing | Chrome device-bound session; rotating `__Secure-1PSIDTS` returns 401 | Re-login in **Firefox** and export again. The panel Keep-alive button should report that `__Secure-1PSIDTS` was refreshed |
 | Panel won't open / 401 | `--admin-token` (or `ADMIN_TOKEN`) doesn't match | An empty token disables auth, which is only acceptable when bound to 127.0.0.1 |
 
@@ -642,6 +642,69 @@ proxy streams chunk by chunk.
 Yes. Set `SQL_DSN` (`mysql://user:pass@host:3306/db` or `postgres://user:pass@host:5432/db?sslmode=disable`);
 unset means SQLite. Tables are created automatically and all three share one schema. SQLite is the easy choice for a
 single instance; MySQL / PostgreSQL only matter when several instances share one pool.
+
+## Miraz fork changes
+
+This fork (used behind the Miraz.tv newsroom pipeline) changes how upstream failures are reported, removes the
+client-side generation timeout, and adds health monitoring. The base project's behaviour is otherwise unchanged.
+
+### Error classes and HTTP status mapping
+
+Every failure of a call to Google is classified where it is detected and mapped to a status in one place
+(`internal/app/upstream_error.go`). Error bodies are OpenAI-shaped: `{"error":{"message","type","code"}}`.
+
+| Failure | HTTP | `code` | Notes |
+|---|---|---|---|
+| Google 429, `RESOURCE_EXHAUSTED` / "usage limit" / "quota" / "rate limit" text in an error body or in an answer with no content, or a 302 to `google.com/sorry` (bot block) | 429 | `upstream_rate_limited` | `Retry-After` header in seconds: Google's own value (header, or a "retry in Ns" hint) if present, otherwise 60; 7200 for the sorry block |
+| Google 5xx, network/DNS/TLS errors, truncated body, HTTP 200 with no content frame (the transient `1155`), 600 s safety ceiling hit, upload or media retrieval failure | 503 | `upstream_unavailable` | Retryable |
+| Google answered in a shape we cannot parse: unexplained 400 (after one bl refresh, see below), 404/405/410, HTTP 200 without any `wrb.fr` frame, canvas without an HTML document | 503 | `upstream_protocol_changed` | Also written to the event log (throttled to one per minute) |
+| No usable cookie: all accounts disabled/expired, XSRF token unobtainable, Google 401/403 for a signed-in request, a login-only model or image/video input with an empty pool | 503 | `no_valid_account` | |
+| All local IP slots are full (the local limiter) | 429 | `ip_slot_full` | Unchanged; no Google quota was consumed |
+| Prompt over `max_prompt_bytes` | 400 | `context_length_exceeded` | Unchanged |
+| Client mistakes (bad JSON, unknown model, `n>1`, empty prompt, unsupported input) | 400 | none | Unchanged |
+| Request body over 80 MB | 413 | `request_too_large` | `http.MaxBytesReader` on every route |
+| Client disconnected | 499 (only in the request log) | | The Google call is cancelled; nothing is written back |
+
+The same mapping applies to `/v1/chat/completions` and `/v1/responses`. Once a stream has started, the HTTP status can no
+longer change, so the class and code travel inside the stream: a chat stream ends with an `error` chunk carrying
+`message`, `type`, `code` (and `retry_after`); a Responses stream emits `response.failed` with the same fields.
+The admin error breakdown (`classifyError`) understands the new classes (`upstream_rate_limited`, `no_valid_account`,
+`upstream_protocol_changed`, `upstream_timeout`, `client_closed`) next to the old ones.
+
+An unexplained 400, or a response whose frames cannot be parsed, is what a stale `bl` build id looks like. The proxy then
+re-scrapes `bl` immediately (at most once per 5 minutes, only with `gemini_bl_auto` on) and, if it changed, retries once
+without spending a retry attempt. Every `bl` change is written to the event log.
+
+### No generation timeout
+
+Google's thinking and writing time is not bounded by this proxy.
+
+- `request_timeout_sec` now bounds only small control requests: the `/app` page fetch (XSRF, `bl`), `RotateCookies`,
+  uploads and media downloads. It no longer applies to `StreamGenerate` or conversation calls.
+- Generation calls use clients without an `http.Client.Timeout`. The inbound request context is passed to the upstream
+  call, so a client disconnect cancels the Google call and frees the IP slot.
+- One safety ceiling of 600 s covers a whole generation, retries included (`generationCeiling` in `client.go`). It is a
+  dead-connection guard only; hitting it is reported as `upstream_unavailable`.
+- TCP keepalive (30 s) is enabled on upstream connections.
+- The server `WriteTimeout` stays 0; `ReadTimeout` (30 s) covers reading the request only.
+
+### Health, canary and events
+
+- `GET /healthz` (no auth, no secrets): `{status, version, accounts:{total,enabled,healthy}, bl:{value_age_seconds, source:"auto"|"config"}, xsrf_ok_last, last_canary:{ok, at, error_class, latency_ms}, problems}`.
+  Returns 200 when at least one healthy account exists (or the pool is empty, or `fallback_anon` is on) and the last canary did not
+  fail; otherwise 503. "Healthy" means enabled with no consecutive failures. `value_age_seconds` and `xsrf_ok_last` are `null`
+  until there is something to report.
+- The canary sends the fixed prompt `Reply with the single word: pong` through the normal generation path and expects
+  "pong" in the answer. The scheduler runs it every `canary_interval_min` minutes (runtime setting, default 30, 0 disables);
+  `POST /admin/api/canary` runs it on demand (409 if one is already running). A run that only hit the local IP-slot limiter is
+  not recorded. The last result is stored in the `kv` table.
+- `GET /admin/api/events` (admin auth) lists the latest 200 rows of the `events(ts, kind, detail)` table, newest first.
+  Kinds: `canary_failed`, `canary_recovered`, `bl_changed`, `account_disabled` (by account id only), `protocol_parse_failure`.
+  Events never contain prompts, answers or cookies. They follow `retention_days`.
+
+### Request size cap
+
+Every request body is limited to 80 MB; larger bodies get `413` with `code: request_too_large`.
 
 ## Acknowledgments
 

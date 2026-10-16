@@ -667,6 +667,9 @@ func classifyError(errStr string) string {
 	switch {
 	case errStr == "":
 		return ""
+	case strings.Contains(errStr, "context canceled"):
+		// 客户端自己断开了，不是上游的错
+		return "client_closed"
 	case strings.Contains(errStr, "no content frame"):
 		// 上游返回 200 但一个内容帧都没有。实测是瞬时拒绝，隔几分钟自行恢复，
 		// 跟频率/并发/累积次数都无关，重试即可。
@@ -677,8 +680,18 @@ func classifyError(errStr string) string {
 		return "blocked_sorry"
 	case strings.Contains(errStr, "upstream HTTP 429"):
 		return "upstream_429"
+	case strings.Contains(errStr, "upstream rate limited"):
+		// 非 429 状态码、但响应里有 quota / usage limit 字样
+		return "upstream_rate_limited"
+	case strings.Contains(errStr, "no valid account"):
+		return "no_valid_account"
+	case strings.Contains(errStr, "upstream protocol changed"):
+		return "upstream_protocol_changed"
+	case strings.Contains(errStr, "safety ceiling"):
+		return "upstream_timeout"
 	case strings.Contains(errStr, "upstream HTTP"):
 		return "upstream_http_error"
+
 	case strings.Contains(errStr, "unknown model"), strings.Contains(errStr, "not supported"):
 		return "bad_request"
 	default:

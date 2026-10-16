@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -79,7 +80,7 @@ func handleMCPHTTP(w http.ResponseWriter, r *http.Request) {
 		writeMCPHTTPError(w, nil, -32700, "parse error")
 		return
 	}
-	resp := dispatchMCP(&req)
+	resp := dispatchMCP(r.Context(), &req)
 	if resp == nil {
 		w.WriteHeader(http.StatusAccepted) // 通知：无响应体
 		return
@@ -96,7 +97,7 @@ func writeMCPHTTPError(w http.ResponseWriter, id json.RawMessage, code int, msg 
 	w.Write(b)
 }
 
-func dispatchMCP(req *rpcRequest) *rpcResponse {
+func dispatchMCP(ctx context.Context, req *rpcRequest) *rpcResponse {
 	// 没有 id 的是通知（notifications/initialized 等），不回响应。
 	if len(req.ID) == 0 {
 		return nil
@@ -144,7 +145,7 @@ func dispatchMCP(req *rpcRequest) *rpcResponse {
 		if query == "" {
 			return ok(toolTextError("query 不能为空"))
 		}
-		text, err := mcpWebSearch(query)
+		text, err := mcpWebSearch(ctx, query)
 		if err != nil {
 			return ok(toolTextError("搜索失败: " + err.Error()))
 		}
@@ -181,12 +182,12 @@ func webSearchToolDef() map[string]interface{} {
 }
 
 // mcpWebSearch 执行一次联网搜索，返回"答案 + 来源清单"的文本。
-func mcpWebSearch(query string) (string, error) {
+func mcpWebSearch(ctx context.Context, query string) (string, error) {
 	mc, ok := Models[rtCfg().DefaultModel]
 	if !ok {
 		mc = Models["gemini-3.6-flash"]
 	}
-	res, err := streamGenerate(query, query, mc, nil, nil)
+	res, err := streamGenerate(ctx, query, query, mc, nil, nil)
 	if err != nil {
 		return "", err
 	}

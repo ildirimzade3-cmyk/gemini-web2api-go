@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -244,8 +245,12 @@ const webUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
 // streamGenerateConv 发一路会话的一轮。turn==0 是首轮（建会话），>0 是续接（只发新消息）。
 // 整条会话绑定 conv.cookie / conv.proxyID，中途不换号不换出口。成功后回填 conv 的
 // cid/rid/rcid/tok26 和 turn+1，供下一轮续接。
-func streamGenerateConv(prompt string, mc ModelConfig, conv *convState,
+func streamGenerateConv(ctx context.Context, prompt string, mc ModelConfig, conv *convState,
 	onDelta, onReasoning func(string)) (*StreamResult, error) {
+	// Dead-connection guard for the whole turn, retries included (see generationCeiling).
+	genCtx, cancelGen := context.WithTimeout(ctx, generationCeiling)
+	defer cancelGen()
+
 	p, slotOK, slotErr := acquireSlot(conv.proxyID)
 	if !slotOK {
 		return &StreamResult{}, slotErr
@@ -335,9 +340,6 @@ func streamGenerateConv(prompt string, mc ModelConfig, conv *convState,
 	geminiHeaders["x-goog-ext-525005358-jspb"] = fmt.Sprintf(`["%s",1]`, reqUUID)
 
 	reqid := time.Now().UnixNano() % 1000000
-	endpoint := fmt.Sprintf(
-		"https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?bl=%s&hl=en&_reqid=%d&rt=c",
-		currentBL(proxyURL), reqid)
 
 	tracker := &deltaTracker{}
 	rtracker := &deltaTracker{}
@@ -364,32 +366,53 @@ func streamGenerateConv(prompt string, mc ModelConfig, conv *convState,
 
 	t0 := time.Now()
 	var lastErr error
+	blRetried := false // one forced bl re-scrape + retry per turn
 	for attempt := 0; attempt < rtCfg().RetryAttempts; attempt++ {
-		statusCode, raw, ttfb, setCookie, err := doGeminiRequest(endpoint, body, geminiHeaders, proxyURL, lineCB)
-		if len(setCookie) > 0 && conv.cookie != "" {
-			if merged := mergeSetCookie(conv.cookie, setCookie); merged != conv.cookie {
+		// The endpoint is rebuilt per attempt so a bl refreshed meanwhile is picked up.
+		r, err := doGeminiRequest(genCtx, geminiEndpoint(currentBL(proxyURL), reqid),
+			body, geminiHeaders, proxyURL, lineCB)
+		if len(r.SetCookie) > 0 && conv.cookie != "" {
+			if merged := mergeSetCookie(conv.cookie, r.SetCookie); merged != conv.cookie {
 				conv.cookie = merged
 			}
 		}
-		if err != nil || statusCode != 200 || !hasContentFrame(string(raw)) {
-			if err == nil && statusCode == 200 {
-				lastErr = fmt.Errorf("续接无内容帧（会话可能已失效，raw %d 字节）", len(raw))
-			} else if err != nil {
-				lastErr = err
-			} else {
-				lastErr = fmt.Errorf("upstream HTTP %d: %s", statusCode, truncate(string(raw), 160))
+		var verdict error
+		if err != nil {
+			// The client went away (or the safety ceiling hit): stop, nothing to retry.
+			if cerr := generationCtxError(ctx, genCtx); cerr != nil {
+				return &StreamResult{ProxyID: p.ID, ProxyName: p.Name, AccountID: conv.accountID}, cerr
 			}
+			verdict = classifyTransportError(genCtx, "request to Gemini failed", err)
+		} else if ue := judgeAttempt(r, conv.isLogin); ue != nil {
+			verdict = ue
+			noteProtocolFailure(ue)
+		}
+		if verdict != nil {
+			lastErr = verdict
 			if pickedOK {
 				recordProxyResult(p.ID, false, lastErr.Error())
 			}
 			if tracker.emitted != "" || rtracker.emitted != "" {
 				break
 			}
+			// An unexplained 400 / unparseable frames are what a stale bl looks like.
+			if upstreamClassOf(verdict) == ClassProtocolChanged && !blRetried {
+				blRetried = true
+				if forceRefreshBL(proxyURL) {
+					logf("[bl] 协议类失败后 bl 已变化，立即重试一次")
+					attempt--
+					continue
+				}
+			}
 			if attempt < rtCfg().RetryAttempts-1 {
-				time.Sleep(time.Duration(rtCfg().RetryDelaySec) * time.Second)
+				if !sleepCtx(genCtx, time.Duration(rtCfg().RetryDelaySec)*time.Second) {
+					return &StreamResult{ProxyID: p.ID, ProxyName: p.Name, AccountID: conv.accountID},
+						generationCtxError(ctx, genCtx)
+				}
 			}
 			continue
 		}
+		raw, ttfb := r.Raw, r.TTFBMs
 		// 成功：回填续接状态。
 		cid, rid, rcid, tok26 := parseConvIDs(string(raw))
 		if cid != "" {
@@ -427,7 +450,7 @@ func streamGenerateConv(prompt string, mc ModelConfig, conv *convState,
 //   - 没命中 → 新建会话，首轮发全量拼接的历史（含 tools 指令，把当前上下文交给服务端）。
 //
 // 支持 tools（续接里也解析 ```tool_call``` 围栏）；图片走原单轮路径（callGemini）。
-func callGeminiConv(messages []map[string]interface{}, mc ModelConfig,
+func callGeminiConv(ctx context.Context, messages []map[string]interface{}, mc ModelConfig,
 	tools []map[string]interface{}, toolChoice interface{},
 	onDelta, onReasoning func(string)) (string, []ToolCall, *StreamResult, error) {
 	parentKey := convParentKey(messages)
@@ -462,7 +485,7 @@ func callGeminiConv(messages []map[string]interface{}, mc ModelConfig,
 		logf("[conv] 续接命中 turn=%d，只发 %d 字节（历史留服务端）", conv.turn, len(prompt))
 	}
 
-	res, err := streamGenerateConv(prompt, mc, conv, onDelta, onReasoning)
+	res, err := streamGenerateConv(ctx, prompt, mc, conv, onDelta, onReasoning)
 	if err != nil {
 		if !fresh {
 			// 续接失败：这路会话作废，客户端重试时会当新会话全量重发。
@@ -479,8 +502,10 @@ func callGeminiConv(messages []map[string]interface{}, mc ModelConfig,
 		if !fresh {
 			convDelete(parentKey)
 		}
-		return "", nil, res, fmt.Errorf("upstream returned no content frame (raw %d bytes)", len(res.Raw))
+		return "", nil, res, newUpstreamError(ClassUnavailable, 200,
+			"upstream returned no content frame (raw %d bytes)", len(res.Raw))
 	}
+
 	// 存续接状态：客户端下一轮把这段回复原样带回来时，parentKey 会命中这里。
 	// 存的是解析掉围栏后的正文 —— 客户端把 assistant 消息带回来时 content 也是这段。
 	convPut(convChildKey(messages, text), conv)

@@ -116,6 +116,16 @@ CREATE TABLE IF NOT EXISTS accounts (
     proxy_id      INTEGER NOT NULL DEFAULT 0      -- 绑定的出口，0 = 还没绑
 );
 CREATE INDEX IF NOT EXISTS idx_accounts_pick ON accounts(status, last_used_at);
+
+-- 结构化事件日志：canary 失败/恢复、bl 变化、账号自动停用、协议解析失败。
+-- 不存 prompt / 回答 / cookie。
+CREATE TABLE IF NOT EXISTS events (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts      INTEGER NOT NULL,
+    kind    TEXT NOT NULL,
+    detail  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 `
 
 func getDB() *dbx {

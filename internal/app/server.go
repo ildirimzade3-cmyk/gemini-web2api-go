@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -129,9 +130,9 @@ func rejectUnsupported(req map[string]interface{}, messages []map[string]interfa
 	return nil
 }
 
-func callGemini(prompt, latest string, mc ModelConfig, tools []map[string]interface{},
+func callGemini(ctx context.Context, prompt, latest string, mc ModelConfig, tools []map[string]interface{},
 	images []pendingUpload, onDelta, onReasoning func(string)) (string, []ToolCall, *StreamResult, error) {
-	res, err := streamGenerateWithFiles(prompt, latest, mc, images, onDelta, onReasoning)
+	res, err := streamGenerateWithFiles(ctx, prompt, latest, mc, images, onDelta, onReasoning)
 	if err != nil {
 		// res 非 nil：失败时它只带归属（哪个号 / 哪个出口），给 recordRequest 用
 		return "", nil, res, err
@@ -143,7 +144,10 @@ func callGemini(prompt, latest string, mc ModelConfig, tools []map[string]interf
 	if mc.Tool == toolCanvas {
 		doc := extractCanvasDoc(res.Raw)
 		if doc == "" {
-			return "", nil, res, fmt.Errorf("canvas generation failed: no HTML document in response (raw %d bytes)", len(res.Raw))
+			ue := newUpstreamError(ClassProtocolChanged, 200,
+				"upstream protocol changed: canvas generation returned no HTML document (raw %d bytes)", len(res.Raw))
+			noteProtocolFailure(ue)
+			return "", nil, res, ue
 		}
 		if text != "" && !strings.Contains(doc, text) {
 			return text + "\n\n" + doc, nil, res, nil // preamble + 文档
@@ -158,7 +162,8 @@ func callGemini(prompt, latest string, mc ModelConfig, tools []map[string]interf
 			if msg == "" {
 				msg = "媒体产物取回失败"
 			}
-			return "", nil, res, fmt.Errorf("media generation succeeded but artifact retrieval failed: %s", msg)
+			return "", nil, res, newUpstreamError(ClassUnavailable, 200,
+				"media generation succeeded but artifact retrieval failed: %s", msg)
 		}
 		// 产物以 base64 data URL 追加到正文（可能没正文，只有图/乐/视频）。
 		text = appendArtifactMarkdown(text, res.Artifacts)
@@ -169,9 +174,10 @@ func callGemini(prompt, latest string, mc ModelConfig, tools []map[string]interf
 		// 字节）。这种情况必须报错：以前会当成空回复返回 200 + content:null，
 		// 客户端看不出请求其实失败了。
 		// 注意不能用 BardErrorInfo 判错 —— 正常响应的结束帧里也带这个码。
-		return "", nil, res, fmt.Errorf("upstream returned no content frame (raw %d bytes)", len(res.Raw))
+		return "", nil, res, classifyEmptyAnswer([]byte(res.Raw))
 	}
 	var toolCalls []ToolCall
+
 	if len(tools) > 0 {
 		text, toolCalls = parseToolCalls(text)
 	}
@@ -218,7 +224,7 @@ func recordRequest(endpoint, model, prompt, response string, res *StreamResult, 
 func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		writeJSON(w, 400, map[string]interface{}{"error": map[string]string{"message": err.Error()}})
+		writeBodyReadError(w, err)
 		return
 	}
 	var req map[string]interface{}
@@ -233,7 +239,7 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	modelName, modelCfg, err := resolveModel(modelInput)
 	if err != nil {
-		writeJSON(w, 400, map[string]interface{}{"error": map[string]string{"message": err.Error()}})
+		writeRejection(w, err)
 		return
 	}
 
@@ -254,16 +260,14 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := rejectUnsupported(req, messages); err != nil {
-		writeJSON(w, 400, map[string]interface{}{"error": map[string]string{
-			"message": err.Error(), "type": "invalid_request_error"}})
+		writeRejection(w, err)
 		return
 	}
 
 	// 图片先解出来带着，真正上传要等挑完账号和出口（见 streamGenerate）。
 	images, err := collectImages(messages, "")
 	if err != nil {
-		writeJSON(w, 400, map[string]interface{}{"error": map[string]string{
-			"message": err.Error(), "type": "invalid_request_error"}})
+		writeRejection(w, err)
 		return
 	}
 
@@ -304,33 +308,18 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	var res *StreamResult
 	if rtCfg().MultiTurn && len(images) == 0 && modelCfg.Tool == 0 {
 		// 多轮：按历史前缀识别续接，命中就只发新消息、历史留服务端。带 tools 也走这条。
-		text, toolCalls, res, err = callGeminiConv(messages, modelCfg, tools, req["tool_choice"], onDelta, onReasoning)
+		text, toolCalls, res, err = callGeminiConv(r.Context(), messages, modelCfg, tools, req["tool_choice"], onDelta, onReasoning)
 	} else {
-		text, toolCalls, res, err = callGemini(prompt, latest, modelCfg, tools, images, onDelta, onReasoning)
+		text, toolCalls, res, err = callGemini(r.Context(), prompt, latest, modelCfg, tools, images, onDelta, onReasoning)
 	}
 	if err != nil {
-		recordRequest("chat.completions", modelName, prompt, "", res, 502, err.Error(), stream)
+		ae := apiErrorFor(err)
+		recordRequest("chat.completions", modelName, prompt, "", res, ae.Status, err.Error(), stream)
 		if sse != nil && sse.Started() {
-			sse.Fail(err) // 已经开流，HTTP 状态码改不了了
+			sse.Fail(ae) // 已经开流，HTTP 状态码改不了了，只能在流里带 class/code
 			return
 		}
-		if ptl, ok := err.(*PromptTooLongError); ok {
-			// 明确报 400 而不是发出去让上游把用户的问题截掉 —— 那样客户端拿到的是
-			// 一个答非所问的 200，根本看不出请求其实没送到。
-			writeJSON(w, 400, map[string]interface{}{"error": map[string]string{
-				"message": ptl.Error(), "type": "invalid_request_error",
-				"code": "context_length_exceeded"}})
-			return
-		}
-		if rle, ok := err.(*RateLimitError); ok {
-			writeJSON(w, 429, map[string]interface{}{"error": map[string]string{
-				"message": rle.Error(),
-				"type":    "rate_limit_exceeded",
-				"code":    "ip_slot_full",
-			}})
-			return
-		}
-		writeJSON(w, 502, map[string]interface{}{"error": map[string]string{"message": "upstream error: " + err.Error()}})
+		writeAPIError(w, ae)
 		return
 	}
 
@@ -437,7 +426,7 @@ func remainingOf(full, emitted string) string {
 func handleResponses(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		writeJSON(w, 400, map[string]interface{}{"error": map[string]string{"message": err.Error()}})
+		writeBodyReadError(w, err)
 		return
 	}
 	var req map[string]interface{}
@@ -452,7 +441,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 	modelName, modelCfg, err := resolveModel(modelInput)
 	if err != nil {
-		writeJSON(w, 400, map[string]interface{}{"error": map[string]string{"message": err.Error()}})
+		writeRejection(w, err)
 		return
 	}
 
@@ -553,15 +542,13 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := rejectUnsupported(req, messages); err != nil {
-		writeJSON(w, 400, map[string]interface{}{"error": map[string]string{
-			"message": err.Error(), "type": "invalid_request_error"}})
+		writeRejection(w, err)
 		return
 	}
 
 	images, err := collectImages(messages, "")
 	if err != nil {
-		writeJSON(w, 400, map[string]interface{}{"error": map[string]string{
-			"message": err.Error(), "type": "invalid_request_error"}})
+		writeRejection(w, err)
 		return
 	}
 
@@ -659,12 +646,13 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	var toolCalls []ToolCall
 	var res *StreamResult
 	if rtCfg().MultiTurn && len(images) == 0 && modelCfg.Tool == 0 {
-		text, toolCalls, res, err = callGeminiConv(messages, modelCfg, tools, req["tool_choice"], onDelta, nil)
+		text, toolCalls, res, err = callGeminiConv(r.Context(), messages, modelCfg, tools, req["tool_choice"], onDelta, nil)
 	} else {
-		text, toolCalls, res, err = callGemini(prompt, latest, modelCfg, tools, images, onDelta, nil)
+		text, toolCalls, res, err = callGemini(r.Context(), prompt, latest, modelCfg, tools, images, onDelta, nil)
 	}
 	if err != nil {
-		recordRequest("responses", modelName, prompt, "", res, 502, err.Error(), stream)
+		ae := apiErrorFor(err)
+		recordRequest("responses", modelName, prompt, "", res, ae.Status, err.Error(), stream)
 		if stream {
 			writeEvent("response.failed", map[string]interface{}{
 				"type": "response.failed",
@@ -673,28 +661,15 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 					"object": "response",
 					"status": "failed",
 					"model":  modelName,
-					"error":  map[string]string{"message": err.Error()},
+					"error": map[string]interface{}{
+						"message": ae.Message, "type": ae.Type, "code": ae.Code,
+						"retry_after": ae.RetryAfter,
+					},
 				},
 			})
 			return
 		}
-		if ptl, ok := err.(*PromptTooLongError); ok {
-			// 明确报 400 而不是发出去让上游把用户的问题截掉 —— 那样客户端拿到的是
-			// 一个答非所问的 200，根本看不出请求其实没送到。
-			writeJSON(w, 400, map[string]interface{}{"error": map[string]string{
-				"message": ptl.Error(), "type": "invalid_request_error",
-				"code": "context_length_exceeded"}})
-			return
-		}
-		if rle, ok := err.(*RateLimitError); ok {
-			writeJSON(w, 429, map[string]interface{}{"error": map[string]string{
-				"message": rle.Error(),
-				"type":    "rate_limit_exceeded",
-				"code":    "ip_slot_full",
-			}})
-			return
-		}
-		writeJSON(w, 502, map[string]interface{}{"error": map[string]string{"message": "upstream error: " + err.Error()}})
+		writeAPIError(w, ae)
 		return
 	}
 

@@ -4,6 +4,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -51,12 +52,50 @@ func resolveProfile(name string) profiles.ClientProfile {
 	}
 }
 
-// getTLSClient returns a tls-client (Chrome 146 fingerprint) for direct connections only.
+// geminiBaseURL is the web app origin. A variable only so tests can point the
+// StreamGenerate and /app calls at a local server.
+var geminiBaseURL = "https://gemini.google.com"
+
+// Timeout model for upstream calls.
+
+// Google's "thinking" and writing time is not ours to cut: a generation call
+// carries no client-side time limit. What bounds it is (a) the inbound request
+// context (a client disconnect cancels the Google call), and (b) generationCeiling,
+// a dead-connection guard only. Small control requests (XSRF/bl page fetch,
+// RotateCookies, uploads, media downloads) keep the short request_timeout_sec.
+const (
+	// generationCeiling bounds one whole generation, retries included. It exists
+	// only so a silently dead connection cannot pin a slot forever; it is far above
+	// any real answer time.
+	generationCeiling = 600 * time.Second
+	// upstreamKeepAlive is the TCP keepalive period on upstream connections, so a
+	// half-dead connection is detected while a long answer is being waited for.
+	upstreamKeepAlive = 30 * time.Second
+	// upstreamDialTimeout bounds only the TCP connect of the stdlib (proxy) path.
+	upstreamDialTimeout = 30 * time.Second
+)
+
+// getTLSClient returns the control-request tls-client (Chrome 146 fingerprint) for
+// direct connections only: request_timeout_sec is a hard total timeout, body read
+// included. Generation calls use getTLSGenClient.
 // For proxied connections we use stdlib (see getStdlibClient) — tls-client's SOCKS5
 // implementation is fragile compared to net/http.
 func getTLSClient() tls_client.HttpClient {
+	return cachedTLSClient(rtCfg().Impersonate, rtCfg().RequestTimeout)
+}
+
+// getTLSGenClient returns the generation tls-client: no http.Client.Timeout, the
+// caller's context and generationCeiling are the only bounds.
+func getTLSGenClient() tls_client.HttpClient {
+	return cachedTLSClient("gen:"+rtCfg().Impersonate, 0)
+}
+
+// cachedTLSClient builds (once per key) a tls-client. timeoutSec == 0 means no
+// total timeout. WithDialer carries the TCP keepalive; tls-client overwrites the
+// dialer's connect timeout with timeoutSec (0 = bounded by the request context).
+func cachedTLSClient(key string, timeoutSec int) tls_client.HttpClient {
 	clientCacheMu.RLock()
-	if c, ok := clientCache[rtCfg().Impersonate]; ok {
+	if c, ok := clientCache[key]; ok {
 		clientCacheMu.RUnlock()
 		return c
 	}
@@ -64,20 +103,21 @@ func getTLSClient() tls_client.HttpClient {
 
 	clientCacheMu.Lock()
 	defer clientCacheMu.Unlock()
-	if c, ok := clientCache[rtCfg().Impersonate]; ok {
+	if c, ok := clientCache[key]; ok {
 		return c
 	}
 	opts := []tls_client.HttpClientOption{
-		tls_client.WithTimeoutSeconds(rtCfg().RequestTimeout),
+		tls_client.WithTimeoutSeconds(timeoutSec),
 		tls_client.WithClientProfile(resolveProfile(rtCfg().Impersonate)),
 		tls_client.WithNotFollowRedirects(),
+		tls_client.WithDialer(net.Dialer{KeepAlive: upstreamKeepAlive}),
 	}
 	client, err := tls_client.NewHttpClient(tls_client.NewNoopLogger(), opts...)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[client] tls-client init failed: %v\n", err)
 		os.Exit(1)
 	}
-	clientCache[rtCfg().Impersonate] = client
+	clientCache[key] = client
 	return client
 }
 
@@ -100,13 +140,23 @@ func getTLSClient() tls_client.HttpClient {
 // 不走代理时仍然用 getTLSClient（保留 utls/chrome146 真指纹优势）。
 
 var (
-	stdlibClientCache sync.Map // proxyURL -> *http.Client
+	stdlibClientCache sync.Map // proxyURL -> *http.Client (control requests)
+	stdlibGenCache    sync.Map // proxyURL -> *http.Client (generation requests)
 )
 
-// getStdlibClient returns an http.Client routed through proxyURL.
-// proxyURL must not be empty (caller checks).
+// getStdlibClient returns the control-request http.Client routed through proxyURL
+// (request_timeout_sec total timeout). proxyURL must not be empty (caller checks).
 func getStdlibClient(proxyURL string) *http.Client {
-	if cached, ok := stdlibClientCache.Load(proxyURL); ok {
+	return cachedStdlibClient(&stdlibClientCache, proxyURL, time.Duration(rtCfg().RequestTimeout)*time.Second)
+}
+
+// getStdlibGenClient is the generation variant: no http.Client.Timeout.
+func getStdlibGenClient(proxyURL string) *http.Client {
+	return cachedStdlibClient(&stdlibGenCache, proxyURL, 0)
+}
+
+func cachedStdlibClient(cache *sync.Map, proxyURL string, timeout time.Duration) *http.Client {
+	if cached, ok := cache.Load(proxyURL); ok {
 		return cached.(*http.Client)
 	}
 	t := &http.Transport{
@@ -116,20 +166,27 @@ func getStdlibClient(proxyURL string) *http.Client {
 		DisableCompression:  false,
 		// 走代理时不强求 HTTP/2，部分代理不支持。
 		ForceAttemptHTTP2: false,
+		// TCP keepalive on the upstream connection; the timeout bounds connect only.
+		DialContext: (&net.Dialer{
+			Timeout:   upstreamDialTimeout,
+			KeepAlive: upstreamKeepAlive,
+		}).DialContext,
+		TLSHandshakeTimeout: 15 * time.Second,
+		// No ResponseHeaderTimeout: Google may think for minutes before the first byte.
 	}
 	if u, err := url.Parse(proxyURL); err == nil {
 		t.Proxy = http.ProxyURL(u)
 	}
 	c := &http.Client{
-		Timeout:   time.Duration(rtCfg().RequestTimeout) * time.Second,
+		Timeout:   timeout,
 		Transport: t,
 		// 跟 tls-client 一致：不自动跟随重定向（302 是诊断信号）
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
-	stdlibClientCache.Store(proxyURL, c)
-	return c
+	actual, _ := cache.LoadOrStore(proxyURL, c)
+	return actual.(*http.Client)
 }
 
 // loadCookie reads the cookie file (Netscape one-line format or JSON).

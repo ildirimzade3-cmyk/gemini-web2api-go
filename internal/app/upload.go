@@ -25,7 +25,7 @@ func uploadBytes(cookie, proxyURL string, data []byte, filename string) (string,
 		return "", fmt.Errorf("取上传页面参数失败: %w", err)
 	}
 	if pushID == "" {
-		return "", fmt.Errorf("页面里没有 push_id，无法上传")
+		return "", newUpstreamError(ClassProtocolChanged, 0, "upstream protocol changed: no push_id in the page, cannot upload")
 	}
 
 	base := map[string]string{
@@ -66,14 +66,14 @@ func uploadBytes(cookie, proxyURL string, data []byte, filename string) (string,
 	status, respHead, body, err := uploadPost(uploadHost, startHeaders,
 		[]byte("File name: "+sanitizeUploadName(filename)), proxyURL)
 	if err != nil {
-		return "", fmt.Errorf("上传 start 失败: %w", err)
+		return "", errUnavailable("upload start failed", err)
 	}
 	if status != 200 {
-		return "", fmt.Errorf("上传 start 返回 HTTP %d: %s", status, truncate(string(body), 160))
+		return "", uploadStatusError("upload start", status, respHead, body, cookie != "")
 	}
 	putURL := respHead["x-goog-upload-url"]
 	if putURL == "" {
-		return "", fmt.Errorf("上传 start 没返回 x-goog-upload-url")
+		return "", newUpstreamError(ClassProtocolChanged, status, "upstream protocol changed: upload start returned no x-goog-upload-url")
 	}
 
 	// 发字节并 finalize
@@ -82,20 +82,28 @@ func uploadBytes(cookie, proxyURL string, data []byte, filename string) (string,
 		"X-Goog-Upload-Command": "upload, finalize",
 		"X-Goog-Upload-Offset":  "0",
 	})
-	status, _, body, err = uploadPost(putURL, upHeaders, data, proxyURL)
+	status, respHead, body, err = uploadPost(putURL, upHeaders, data, proxyURL)
 	if err != nil {
-		return "", fmt.Errorf("上传 finalize 失败: %w", err)
+		return "", errUnavailable("upload finalize failed", err)
 	}
 	if status != 200 {
-		return "", fmt.Errorf("上传 finalize 返回 HTTP %d: %s", status, truncate(string(body), 160))
+		return "", uploadStatusError("upload finalize", status, respHead, body, cookie != "")
 	}
 	// 响应体就是引用路径。不以 "/" 开头说明拿到的是错误页，填进 payload 服务端
 	// 未必报错，但模型看到的附件是空的。
 	ref := strings.TrimSpace(string(body))
 	if !strings.HasPrefix(ref, "/") {
-		return "", fmt.Errorf("上传返回的不是引用路径: %s", truncate(ref, 160))
+		return "", newUpstreamError(ClassProtocolChanged, status, "upstream protocol changed: upload did not return a reference path")
 	}
 	return ref, nil
+}
+
+// uploadStatusError classifies a non-200 answer of the upload endpoint. headers
+// are lower-cased (see uploadPost).
+func uploadStatusError(what string, status int, headers map[string]string, body []byte, signedIn bool) error {
+	ue := classifyHTTPFailure(status, string(body), headers["location"], headers["retry-after"], signedIn)
+	ue.Detail = fmt.Sprintf("%s: %s", what, ue.Detail)
+	return ue
 }
 
 // sanitizeUploadName 去掉会破坏请求体的字符——文件名原样进 start 的 body。

@@ -120,6 +120,8 @@ func Run() {
 	// MCP over HTTP（Streamable HTTP）：跟 OpenAI 接口同进程同端口，暴露 web_search。
 	// 用同一把 API key 鉴权，客户端配 Authorization: Bearer <key> 连这个 URL。
 	mux.HandleFunc("/mcp", requireAPIKey(handleMCPHTTP))
+	// Health: no auth, no secrets (see health.go).
+	mux.HandleFunc("/healthz", handleHealthz)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
 			handleRoot(w, r)
@@ -145,15 +147,12 @@ func Run() {
 		mux.HandleFunc("/admin/api/cookies", requireAuth(handleAdminCookies))
 		mux.HandleFunc("/admin/api/cookies/", requireAuth(handleAdminCookieItem))
 		mux.HandleFunc("/admin/api/test", requireAuth(handleAdminTest))
+		mux.HandleFunc("/admin/api/canary", requireAuth(handleAdminCanary))
+		mux.HandleFunc("/admin/api/events", requireAuth(handleAdminEvents))
 	}
 
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
-	server := &http.Server{
-		Addr:         addr,
-		Handler:      mux,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 0, // streaming responses can be long
-	}
+	server := newHTTPServer(addr, mux)
 
 	cookieStatus := "none (anonymous)"
 	if total, enabled := accountCount(); enabled > 0 {
@@ -200,6 +199,18 @@ func Run() {
 	if err := server.ListenAndServe(); err != nil {
 		fmt.Fprintf(os.Stderr, "server error: %v\n", err)
 		os.Exit(1)
+	}
+}
+
+// newHTTPServer builds the listener config. WriteTimeout must stay 0: a long
+// answer (or an SSE stream) is written for minutes. ReadTimeout covers reading
+// the request only. Every request body is capped (see capBody).
+func newHTTPServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{
+		Addr:         addr,
+		Handler:      capBody(h),
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 0,
 	}
 }
 

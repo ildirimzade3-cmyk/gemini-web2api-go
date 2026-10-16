@@ -24,6 +24,10 @@ func startScheduler() {
 		// 会话保活：启动后先尽快刷一次 1PSIDTS（导入的票可能已经快到期），
 		// 之后按服务端在轮转页里指定的间隔走（实测 600 秒）。
 		rotate := time.NewTimer(firstRotateDelay)
+		// Canary: the tick only checks whether one is due (canary_interval_min is
+		// a runtime setting); the run itself must not block the other loops.
+		canary := time.NewTicker(time.Minute)
+		defer canary.Stop()
 		defer hourly.Stop()
 		defer daily.Stop()
 		defer retention.Stop()
@@ -42,6 +46,9 @@ func startScheduler() {
 				loadProxies()
 			case <-rotate.C:
 				rotate.Reset(rotateAllAccounts())
+			case <-canary.C:
+				go maybeRunCanary()
+
 			}
 		}
 	}()
@@ -256,6 +263,7 @@ func retentionSweep() {
 		return
 	}
 	cutoff := time.Now().Unix() - int64(rtCfg().RetentionDays)*86400
+	_, _ = getDB().Exec(`DELETE FROM events WHERE ts < ?`, cutoff)
 	res, err := getDB().Exec(`DELETE FROM requests WHERE ts < ?`, cutoff)
 	if err != nil {
 		logf("[retention] failed: %v", err)

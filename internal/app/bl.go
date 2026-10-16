@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"regexp"
 	"sync"
 	"time"
@@ -19,6 +20,8 @@ var (
 	blFetched  string    // 抓到的最新值，空表示还没抓到
 	blFetchAt  time.Time // 上次抓取尝试的时间（成功失败都记，避免失败时疯狂重试）
 	blFetching bool      // 有一次抓取正在飞
+	blValueAt  time.Time // 抓到当前 blFetched 的时刻（healthz 用）
+	blForcedAt time.Time // 上次强制刷新的时刻（5 分钟地板，见 forceRefreshBL）
 )
 
 // bl 变化的粒度是天，隔几小时看一眼足够。
@@ -77,27 +80,87 @@ func refreshBL(proxyURL string) {
 		blMu.Unlock()
 	}()
 
+	got, err := scrapeBL(proxyURL)
+	if err != nil {
+		logf("[bl] %v，继续用当前值", err)
+		return
+	}
+	applyScrapedBL(got)
+}
+
+// scrapeBL fetches /app anonymously and returns a shape-validated bl value.
+func scrapeBL(proxyURL string) (string, error) {
 	body, err := fetchAppPage("", proxyURL)
 	if err != nil {
-		logf("[bl] 抓 /app 失败，继续用当前值: %v", err)
-		return
+		return "", fmt.Errorf("抓 /app 失败: %w", err)
 	}
 	m := cfb2hRe.FindSubmatch(body)
 	if m == nil {
-		logf("[bl] 页面里没有 cfb2h，继续用当前值")
-		return
+		return "", fmt.Errorf("页面里没有 cfb2h")
 	}
 	got := string(m[1])
 	if !blValueRe.MatchString(got) {
-		logf("[bl] 抓到的值形状不对，忽略: %q", truncate(got, 60))
-		return
+		return "", fmt.Errorf("抓到的值形状不对，忽略: %q", truncate(got, 60))
 	}
+	return got, nil
+}
 
+// applyScrapedBL stores a scraped value and reports whether it differs from the
+// value that was in effect until now. A change is written to the event log.
+func applyScrapedBL(got string) (changed bool) {
+	prev := rtCfg().GeminiBL
 	blMu.Lock()
-	changed := blFetched != got
-	blFetched = got
-	blMu.Unlock()
-	if changed {
-		logf("[bl] 更新为 %s（配置里钉的是 %s）", got, rtCfg().GeminiBL)
+	if blFetched != "" {
+		prev = blFetched
 	}
+	blFetched = got
+	blValueAt = time.Now()
+	blMu.Unlock()
+	if got == prev {
+		return false
+	}
+	logf("[bl] 更新为 %s（此前是 %s）", got, prev)
+	LogEvent(EventBLChanged, fmt.Sprintf("bl %s -> %s", prev, got))
+	return true
+}
+
+// blForceFloor is the minimum gap between two forced re-scrapes, so a burst of
+// failing requests cannot hammer the /app page.
+const blForceFloor = 5 * time.Minute
+
+// forceRefreshBL re-scrapes bl right now (a request just failed in a way a stale
+// bl explains: an unexplained 400 or unparseable frames). It respects blForceFloor
+// and returns true only when the effective bl actually changed, i.e. when
+// retrying the request can make a difference. With gemini_bl_auto off the pinned
+// value is authoritative and nothing is scraped.
+func forceRefreshBL(proxyURL string) bool {
+	if !rtCfg().GeminiBLAuto {
+		return false
+	}
+	blMu.Lock()
+	if time.Since(blForcedAt) < blForceFloor {
+		blMu.Unlock()
+		return false
+	}
+	blForcedAt = time.Now()
+	blMu.Unlock()
+
+	got, err := scrapeBL(proxyURL)
+	if err != nil {
+		logf("[bl] 强制刷新失败: %v", err)
+		return false
+	}
+	return applyScrapedBL(got)
+}
+
+// blStatus describes where the bl in use comes from, for /healthz. ageSec is
+// nil when the value is the pinned config value (its age is unknown).
+func blStatus() (ageSec *int64, source string) {
+	blMu.RLock()
+	defer blMu.RUnlock()
+	if rtCfg().GeminiBLAuto && blFetched != "" {
+		a := int64(time.Since(blValueAt).Seconds())
+		return &a, "auto"
+	}
+	return nil, "config"
 }

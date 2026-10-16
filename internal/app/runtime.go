@@ -19,9 +19,13 @@ import (
 // 否则它不在 body 里、每次点「保存并生效」都被解成零值冲掉（multi_turn 就这么被静默
 // 重置过，连 config.json 里设的都白设，见 #27）。
 type RuntimeConfig struct {
-	RetryAttempts   int    `json:"retry_attempts"`
-	RetryDelaySec   int    `json:"retry_delay_sec"`
-	RequestTimeout  int    `json:"request_timeout_sec"`
+	RetryAttempts int `json:"retry_attempts"`
+	RetryDelaySec int `json:"retry_delay_sec"`
+	// RequestTimeout bounds only small control requests (XSRF / bl page fetch,
+	// RotateCookies, uploads, media downloads). Generation calls have no
+	// client-side time limit; see generationCeiling in client.go.
+	RequestTimeout int `json:"request_timeout_sec"`
+
 	DefaultModel    string `json:"default_model"`
 	PerIPConcurrent int    `json:"per_ip_concurrent"`
 	PerIPRPM        int    `json:"per_ip_rpm"`
@@ -59,6 +63,10 @@ type RuntimeConfig struct {
 	// 取代 auto_delete_conversation（省掉删除 RPC）。只登录态有意义，与 multi_turn 冲突
 	// （multi_turn 开着时不发）。默认 false，见 temporaryChatEligible。
 	TemporaryChat bool `json:"temporary_chat"`
+	// CanaryIntervalMin: how often the scheduler sends the canary prompt through
+	// the normal path (minutes). 0 disables the scheduled canary (the on-demand
+	// POST /admin/api/canary still works). See health.go.
+	CanaryIntervalMin int `json:"canary_interval_min"`
 }
 
 const runtimeConfigKey = "runtime_config"
@@ -94,6 +102,7 @@ func initRuntimeConfig() {
 		AutoDeleteConversation: cfg.AutoDeleteConversation,
 		AnonFirst:              cfg.AnonFirst,
 		TemporaryChat:          cfg.TemporaryChat,
+		CanaryIntervalMin:      cfg.CanaryIntervalMin,
 	}
 	if raw := kvGet(runtimeConfigKey); raw != "" {
 		saved := base
@@ -138,6 +147,7 @@ func validateRuntimeConfig(c RuntimeConfig) error {
 		{"retention_days", c.RetentionDays, 1, 3650},
 		{"proxy_cooldown_min", c.ProxyCooldownMin, 0, 10080},
 		{"max_prompt_bytes", c.MaxPromptBytes, 0, 10000000},
+		{"canary_interval_min", c.CanaryIntervalMin, 0, 1440},
 	} {
 		if r.v < r.min || r.v > r.max {
 			return fmt.Errorf("%s=%d 超出允许范围 [%d, %d]", r.name, r.v, r.min, r.max)
