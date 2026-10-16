@@ -14,6 +14,7 @@ package app
 // and cannot be combined with tools.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -38,7 +39,14 @@ type jsonSpec struct {
 	Root   string                 // jsonRootObject / jsonRootArray / jsonRootAny
 	Strict bool
 	Name   string
+	// prompt is the request's own text (without the format block). Set by
+	// runJSONMode; the wrapper heuristic reads it, see unwrapWrapper.
+	prompt string
 }
+
+// wrapperKeys are the single top-level keys under which a model sometimes puts
+// the object it was asked for ({"schema": {...}}, {"json": {...}}, ...).
+var wrapperKeys = []string{"schema", "json", "response", "output", "result", "data"}
 
 // newJSONSpec builds a spec from a client schema (nil = json_object mode). Root
 // follows the schema's type: array, otherwise object.
@@ -129,8 +137,9 @@ func (s *jsonSpec) instruction() string {
 	var b strings.Builder
 	b.WriteString("[System instruction — output format, highest priority]: ")
 	fmt.Fprintf(&b, "Reply with exactly one %s and nothing else. ", s.rootNoun())
-	b.WriteString("No markdown code fences, no text before or after it, no comments, no trailing commas; " +
-		"use double-quoted keys and strings.")
+	b.WriteString(s.noWrapSentence() + " ")
+	b.WriteString("No markdown code fences, no markdown formatting or links (write URLs as plain text), " +
+		"no text before or after it, no comments, no trailing commas; use double-quoted keys and strings.")
 	if s.Schema != nil {
 		raw, _ := json.Marshal(s.Schema)
 		b.WriteString("\nThe reply must conform to this JSON Schema")
@@ -151,8 +160,85 @@ func (s *jsonSpec) repairInstruction(p *jsonProblem) string {
 	var b strings.Builder
 	b.WriteString("[System instruction — output format, highest priority]: ")
 	fmt.Fprintf(&b, "Your previous reply was rejected: %s. ", p.Repair())
+	b.WriteString(s.noWrapSentence() + " ")
 	fmt.Fprintf(&b, "Reply again with the corrected %s only — no explanation, no apology, no markdown code fences.", s.rootNoun())
 	return b.String()
+}
+
+// noWrapSentence tells the model that the reply itself is the top-level value.
+func (s *jsonSpec) noWrapSentence() string {
+	thing := "object"
+	if s.Root == jsonRootArray {
+		thing = "array"
+	}
+	return fmt.Sprintf("The %s itself is the top-level value: do not wrap it in another key such as "+
+		`"schema", "json", "response", "output", "result" or "data", and do not nest it in an array or a second object.`, thing)
+}
+
+// promptNamesKey reports whether the request's own text asks for key as a
+// top-level field: `"key":` (any quote style, as in an example or a template),
+// or the key quoted on a line that says it is required / a field / a property.
+// It errs on the side of "yes": a false positive only skips the unwrap.
+func promptNamesKey(prompt, key string) bool {
+	for _, q := range []string{`"`, `'`, "`"} {
+		tok := q + key + q
+		from := 0
+		for {
+			i := strings.Index(prompt[from:], tok)
+			if i < 0 {
+				break
+			}
+			i += from
+			rest := strings.TrimLeft(prompt[i+len(tok):], " \t")
+			if strings.HasPrefix(rest, ":") {
+				return true
+			}
+			ls := strings.LastIndexByte(prompt[:i], '\n') + 1
+			le := strings.IndexByte(prompt[i:], '\n')
+			if le < 0 {
+				le = len(prompt)
+			} else {
+				le += i
+			}
+			line := strings.ToLower(prompt[ls:le])
+			for _, w := range []string{"required", "must contain", "must include", "top-level", "top level", "field", "property", "key"} {
+				if strings.Contains(line, w) {
+					return true
+				}
+			}
+			from = i + len(tok)
+		}
+	}
+	return false
+}
+
+// unwrapWrapper handles json_object mode without a schema: a top-level object
+// with exactly one key from wrapperKeys whose value is an object is the wanted
+// object in a wrapper, so the inner object is the answer. It does not apply when
+// the request's own text names that key as a field (promptNamesKey), because then
+// the wrapper is what was asked for. With a schema nothing is unwrapped here: a
+// wrapped answer fails validation and goes through the repair round.
+func unwrapWrapper(clean, prompt string) (string, bool) {
+	var top map[string]json.RawMessage
+	if json.Unmarshal([]byte(clean), &top) != nil || len(top) != 1 {
+		return clean, false
+	}
+	for _, key := range wrapperKeys {
+		raw, ok := top[key]
+		if !ok {
+			continue
+		}
+		inner := strings.TrimSpace(string(raw))
+		if !strings.HasPrefix(inner, "{") || promptNamesKey(prompt, key) {
+			return clean, false
+		}
+		var buf bytes.Buffer
+		if json.Compact(&buf, []byte(inner)) != nil {
+			return clean, false
+		}
+		return buf.String(), true
+	}
+	return clean, false
 }
 
 // extractJSON cuts the outermost JSON value out of an answer: a surrounding
@@ -230,6 +316,9 @@ func checkJSONAnswer(text string, spec *jsonSpec) (string, *jsonProblem) {
 	if p != nil {
 		return "", p
 	}
+	// Web-app artifacts inside string values: markdown escapes that are not JSON
+	// escapes, and string values that are a self-referencing markdown link.
+	clean = rewriteJSONStrings(fixInvalidJSONEscapes(clean), unwrapExactLink)
 	dec := json.NewDecoder(strings.NewReader(clean))
 	dec.UseNumber()
 	var val interface{}
@@ -245,6 +334,8 @@ func checkJSONAnswer(text string, spec *jsonSpec) (string, *jsonProblem) {
 		if p := validateJSON(spec.Schema, val); p != nil {
 			return "", p
 		}
+	} else if spec.Root != jsonRootArray {
+		clean, _ = unwrapWrapper(clean, spec.prompt)
 	}
 	return clean, nil
 }
@@ -256,6 +347,9 @@ type jsonGenerator func(ctx context.Context, prompt, latest string) (string, *St
 // the plain request; the format block is added here. The returned StreamResult
 // is the last call's; TotalMs covers both calls.
 func runJSONMode(ctx context.Context, spec *jsonSpec, prompt, latest string, gen jsonGenerator) (string, *StreamResult, error) {
+	own := *spec // keep the caller's spec untouched; the wrapper heuristic needs the request text
+	own.prompt = joinBlocks(prompt, latest)
+	spec = &own
 	instr := spec.instruction()
 	fullPrompt := joinBlocks(prompt, instr)
 	latestFull := latest

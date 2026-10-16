@@ -247,7 +247,7 @@ func browserGenerate(ctx context.Context, base string, mc ModelConfig, prompt st
 		return "", nil, newUpstreamError(ClassUnavailable, resp.StatusCode, "browser fallback: empty answer")
 	}
 	ms := time.Since(t0).Milliseconds()
-	return ans.Text, &StreamResult{
+	return unwrapAutoLinks(ans.Text), &StreamResult{
 		UpstreamModel: ans.ModelLabelSeen,
 		ProxyName:     browserTransportName,
 		TTFBMs:        ms,

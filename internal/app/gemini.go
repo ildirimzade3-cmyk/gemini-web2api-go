@@ -315,6 +315,10 @@ type deltaTracker struct{ emitted string }
 // Push 吃进一帧的累积全文，返回相对上一次的增量；没有新增或无法安全 diff 时返回 ""。
 func (d *deltaTracker) Push(fullText string) string {
 	cleaned := cleanGeminiText(fullText)
+	// A frame that ends inside a markdown link may still turn into a bare URL
+	// (unwrapAutoLinks); hold that tail back so what is sent stays a prefix of the
+	// final text. The caller sends the rest at the end.
+	cleaned = cleaned[:pendingTailStart(cleaned)]
 	if len(cleaned) <= len(d.emitted) || !strings.HasPrefix(cleaned, d.emitted) {
 		return ""
 	}
@@ -1201,8 +1205,10 @@ var codeArtifactRe = regexp.MustCompile("(?s)```(?:python|javascript|text)\\?cod
 // 用于清洗后为空时的回退：把标记降级成普通 ```python，保留代码/结果不整条清空。
 var codeMarkerRe = regexp.MustCompile("```(python|javascript|text)\\?code_(?:reference|stdout)&code_event_index=\\d+")
 
+// cleanGeminiText is the one place where web-app artifacts leave an answer: code
+// execution blocks, and markdown auto-links around plain URLs (web_artifacts.go).
 func cleanGeminiText(text string) string {
-	return strings.TrimSpace(codeArtifactRe.ReplaceAllString(text, ""))
+	return strings.TrimSpace(unwrapAutoLinks(codeArtifactRe.ReplaceAllString(text, "")))
 }
 
 func truncate(s string, n int) string {

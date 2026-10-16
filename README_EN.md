@@ -849,6 +849,18 @@ Behaviour:
 - **Result**: the clean JSON text is the message content (`choices[0].message.content`, `output_text`, or the
   candidate's text part). The first `{` (or `[` when the schema root is an array) starts the value, the matching close
   ends it.
+- **Wrapper objects**: the format block says the object itself is the top-level value and must not be wrapped in a key
+  such as `"schema"`, `"json"`, `"response"`, `"output"`, `"result"` or `"data"` (the repair message repeats it).
+  Without a schema (`json_object`, or `responseMimeType` alone) a top-level object with **exactly one** key from that
+  list whose value is an **object** is unwrapped to that inner object. Heuristic guard: it is *not* unwrapped when the
+  request's own text names that key as a field, i.e. `"key":` (also `'key'` or `` `key` ``) appears in the prompt, or the
+  quoted key sits on a line that says required / field / property / key / top-level; a false positive only skips the
+  unwrap. Other shapes (several keys, an array or string value, another key name) are left as they are. With a schema
+  nothing is unwrapped: the wrapped answer fails validation and goes through the repair round.
+- **Web-app artifacts inside the JSON**: the web app markdown-escapes characters in string values; a backslash before
+  an ASCII punctuation character that is not a valid JSON escape (`\_`, `\*`, `\#`, `\-`, ...) is dropped, valid
+  escapes stay. A string value that is exactly `[label](url)` with label and url the same URL is unwrapped to the URL.
+  See "Answer text cleanup" for links in the extraction layer.
 - **Buffered**: the answer is checked before anything is sent, so streaming clients (`stream: true`,
   `streamGenerateContent`) receive the clean JSON in one piece at the end. JSON requests always use the single-turn
   prompt path (`multi_turn` is bypassed).
@@ -868,6 +880,24 @@ curl -s http://localhost:8083/v1/chat/completions \
   }'
 # choices[0].message.content is {"headline":"...","topics":["..."]}
 ```
+
+### Answer text cleanup (auto-linked URLs)
+
+The web app renders markdown, so a URL in the model's text comes back as `[https://example.com/a](https://example.com/a)`
+(or `<https://example.com/a>`), which corrupts string fields of JSON answers. `cleanGeminiText` (`gemini.go`), the one
+place every answer text passes through, replaces such links with the bare URL (`web_artifacts.go`), on all routes
+(`/v1/chat/completions`, `/v1/responses`, `/v1beta`), streaming and not, and the browser fallback's text gets the same
+treatment.
+
+- Replaced: an inline link whose label is its own target, also when the label has no scheme, differs only by trailing
+  slashes, or carries markdown escapes (`a\_b`); and `<http(s)://...>` autolinks. The text the model wrote (the label)
+  is what remains.
+- Left alone: links with a different label (`[the report](https://...)`, `[example.com](https://example.com/a/b)`),
+  images, links with a title, and anything that is not an http(s) target.
+- Streaming: the stream is a prefix diff of cumulative frames, so a frame that ends inside an unfinished link keeps that
+  tail back (`pendingTailStart`) until it resolves; the final text carries the rest.
+- Not touched in plain-text answers: other markdown (escapes, emphasis). The markdown-escape cleanup above applies to
+  JSON mode only.
 
 ### Gemini-native endpoints (`/v1beta`)
 
