@@ -488,7 +488,7 @@ This does not change the blocking threshold, though: in a same-start comparison,
 | `POST /v1/responses` | ✅ | OpenAI Responses API (used by Codex CLI). **Not incrementally streamed** — still buffered, then emitted as the event sequence |
 | `GET /v1/models` | ✅ | 2 models anonymously, the third appears once a cookie is set |
 | `GET /` | ✅ | Health check, unauthenticated, returns status/version/models |
-| `/v1beta/models/…` (Gemini CLI native) | ❌ | Not implemented, only OpenAI-shaped endpoints are exposed |
+| `/v1beta/models/…` (Gemini API native) | ✅ | Miraz fork: `generateContent`, `streamGenerateContent`, model list/get, JSON mode, thinking levels, inline files. See "Miraz fork changes" below | 
 | `/v1/embeddings`, `/v1/images/*`, `/v1/audio/*` | ❌ | Not implemented, return 404 |
 | Function calling | ⚠️ | Prompt-level implementation (the model emits a ` ```tool_call``` ` block that we parse with a regex), not a real protocol layer. **Reliable for looking up private data or internal systems**, but anything Gemini can answer itself (the weather) gets answered directly, and side-effecting actions (sending email) are refused. **Agentic clients (Codex, etc.) now work**: before 4.11.0 their tens-of-KB system prompts buried our tool instructions and caused off-topic replies; fixed now. Since 4.12.0 tool results are condensed into a clear success/failure signal, so weak models no longer misread a no-output success as a failure and loop retrying (measured: the same task dropped from 26 loops to 2-4 before it concludes) |
 | `tool_choice` | ⚠️ | `none` injects no tool definitions at all; `required` and a named function add mandatory wording and drop the other tools from the prompt. A prompt-level layer **cannot truly force it** — in testing, questions the model can answer itself (weather, 2+2) were answered directly even under `required` |
@@ -496,9 +496,10 @@ This does not change the blocking threshold, though: in a same-start comparison,
 | `usage` token counts | ✅ | tiktoken cl100k_base, the same basis as the panel's requests table |
 | `n` > 1 | ❌ | Returns 400. Upstream yields a single candidate; silently treating it as 1 would short-change the client |
 | Sampling params | ➖ | `temperature` / `top_p` / `max_tokens` / `stop` / `seed` / `presence_penalty` / `frequency_penalty` are **accepted and ignored, not rejected**. Gemini's web protocol has no such knobs |
-| `response_format` / `logprobs` | ➖ | Not implemented, accepted and ignored |
-| Vision / image input | ⚠️ | **Works with a cookie**: both `image_url` (chat) and `input_image` (responses) are accepted, from `data:` URLs or http(s) links, up to 12MB per image. Anonymous returns 400 — anonymous upload **does** work (`content-push.googleapis.com/upload/`, two-step resumable), but referencing the uploaded file in a conversation is refused upstream (`BardErrorInfo 1100`) |
-| Audio | ❌ | Sending `input_audio` returns 400. The web app has music generation (Lyria 3), signed-in only |
+| `response_format` | ✅ | Miraz fork: `json_object` and `json_schema` are enforced (validate + one repair round), also `text.format` on `/v1/responses`. See "Structured JSON output" below | 
+| `logprobs` | ➖ | Not implemented, accepted and ignored |
+| Vision / image input | ⚠️ | **Works with a cookie**: both `image_url` (chat) and `input_image` (responses) are accepted, from `data:` URLs or http(s) links, up to 12MB per image (other files and video: see "Files, video and audio" below). Anonymous is refused (503 `no_valid_account`) — anonymous upload **does** work (`content-push.googleapis.com/upload/`, two-step resumable), but referencing the uploaded file in a conversation is refused upstream (`BardErrorInfo 1100`) |
+| Audio input | ⚠️ | Miraz fork: `input_audio` is accepted and uploaded as a file attachment (kind 3, real audio mime). Whether Google's web app actually reads it is to be verified live. The web app also has music generation (Lyria 3), signed-in only |
 
 ## Project layout
 
@@ -646,7 +647,8 @@ single instance; MySQL / PostgreSQL only matter when several instances share one
 ## Miraz fork changes
 
 This fork (used behind the Miraz.tv newsroom pipeline) changes how upstream failures are reported, removes the
-client-side generation timeout, and adds health monitoring. The base project's behaviour is otherwise unchanged.
+client-side generation timeout, adds health monitoring, structured JSON output, Gemini-native `/v1beta` endpoints and
+inline file input. The base project's behaviour is otherwise unchanged.
 
 ### Error classes and HTTP status mapping
 
@@ -659,13 +661,16 @@ Every failure of a call to Google is classified where it is detected and mapped 
 | Google 5xx, network/DNS/TLS errors, truncated body, HTTP 200 with no content frame (the transient `1155`), 600 s safety ceiling hit, upload or media retrieval failure | 503 | `upstream_unavailable` | Retryable |
 | Google answered in a shape we cannot parse: unexplained 400 (after one bl refresh, see below), 404/405/410, HTTP 200 without any `wrb.fr` frame, canvas without an HTML document | 503 | `upstream_protocol_changed` | Also written to the event log (throttled to one per minute) |
 | No usable cookie: all accounts disabled/expired, XSRF token unobtainable, Google 401/403 for a signed-in request, a login-only model or image/video input with an empty pool | 503 | `no_valid_account` | |
+| The model answered but not with JSON that satisfies `response_format` / `responseSchema`, even after the repair round | 503 | `upstream_invalid_json` | See "Structured JSON output"; the message never contains the answer |
 | All local IP slots are full (the local limiter) | 429 | `ip_slot_full` | Unchanged; no Google quota was consumed |
 | Prompt over `max_prompt_bytes` | 400 | `context_length_exceeded` | Unchanged |
-| Client mistakes (bad JSON, unknown model, `n>1`, empty prompt, unsupported input) | 400 | none | Unchanged |
+| Client mistakes (bad JSON, unknown model, `n>1`, empty prompt, bad `response_format`) | 400 | none | Unchanged |
+| Unsupported attachment type | 400 | `unsupported_input` | See "Files, video and audio" |
+| Attachment over its size cap | 413 | `attachment_too_large` | 12 MB image, 50 MB video or file |
 | Request body over 80 MB | 413 | `request_too_large` | `http.MaxBytesReader` on every route |
 | Client disconnected | 499 (only in the request log) | | The Google call is cancelled; nothing is written back |
 
-The same mapping applies to `/v1/chat/completions` and `/v1/responses`. Once a stream has started, the HTTP status can no
+The same mapping applies to `/v1/chat/completions` and `/v1/responses` (and, in Google's error shape, to `/v1beta`). Once a stream has started, the HTTP status can no
 longer change, so the class and code travel inside the stream: a chat stream ends with an `error` chunk carrying
 `message`, `type`, `code` (and `retry_after`); a Responses stream emits `response.failed` with the same fields.
 The admin error breakdown (`classifyError`) understands the new classes (`upstream_rate_limited`, `no_valid_account`,
@@ -705,6 +710,184 @@ Google's thinking and writing time is not bounded by this proxy.
 ### Request size cap
 
 Every request body is limited to 80 MB; larger bodies get `413` with `code: request_too_large`.
+
+### Structured JSON output
+
+Google's web app has no response-schema switch, so JSON mode is enforced by the bridge: a strict format block is
+appended to the prompt, the answer is cut down to its outermost JSON value (markdown fences and prose around it are
+dropped), parsed, and validated when a schema is given.
+
+Requests that turn it on:
+
+| API | Field |
+|---|---|
+| `/v1/chat/completions` | `response_format: {"type":"json_object"}` or `{"type":"json_schema","json_schema":{"name","schema","strict"}}` |
+| `/v1/responses` | `text.format: {"type":"json_object"}` or `{"type":"json_schema","name","schema","strict"}` |
+| `/v1beta/...:generateContent` | `generationConfig.responseMimeType: "application/json"`, optionally with `responseJsonSchema` (JSON Schema) or `responseSchema` (OpenAPI subset: upper-case types, `nullable`, `propertyOrdering`) |
+
+Behaviour:
+
+- **Validation subset**: `type` (including unions such as `["string","null"]` and `nullable`), `properties`, `required`,
+  `additionalProperties` (false or a schema), `enum`, `const`, `items`, `anyOf` / `oneOf` / `allOf`, local `$ref`
+  (`#/$defs/...`), `minItems` / `maxItems`, `minLength` / `maxLength`, `minimum` / `maximum`. Anything else (`pattern`,
+  `format`, ...) is shown to the model but not enforced. The schema is validated whether or not `strict` is set; `strict`
+  only adds a stronger sentence to the prompt.
+- **One repair round**: if the answer is not valid JSON or violates the schema, the same request sends the original
+  prompt, the invalid answer and the validation error back and asks for corrected JSON only. The repair runs on the **same
+  cookie account** (and egress) as the first call, with the same attachments. It has no time limit of its own: each Google
+  call is bounded only by the 600 s dead-connection ceiling and the client disconnecting. A Google failure in the first
+  call is returned as is, without a repair.
+- **Still invalid** after the repair: `503` with `code: upstream_invalid_json` (`type: upstream_error`; on the Gemini
+  routes `status: UNAVAILABLE` with the code in `error.details[0].reason`). It is a 503 so a caller's pool fails over to
+  another provider. The error message names a location and a rule (`$.items[2].title: expected string, got number`),
+  never the model's text.
+- **Result**: the clean JSON text is the message content (`choices[0].message.content`, `output_text`, or the
+  candidate's text part). The first `{` (or `[` when the schema root is an array) starts the value, the matching close
+  ends it.
+- **Buffered**: the answer is checked before anything is sent, so streaming clients (`stream: true`,
+  `streamGenerateContent`) receive the clean JSON in one piece at the end. JSON requests always use the single-turn
+  prompt path (`multi_turn` is bypassed).
+- **Not combinable with tools**: `response_format` / `text.format` together with `tools` is `400`.
+- `temperature`, `top_p`, `max_tokens`, `maxOutputTokens`, `stop`, ... are accepted and ignored; output is never cut.
+
+```bash
+curl -s http://localhost:8083/v1/chat/completions \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemini-3.6-flash",
+    "messages": [{"role":"user","content":"Summarise: the parliament approved the 2027 budget."}],
+    "response_format": {"type":"json_schema","json_schema":{"name":"story","strict":true,"schema":{
+      "type":"object",
+      "properties":{"headline":{"type":"string"},"topics":{"type":"array","items":{"type":"string"}}},
+      "required":["headline","topics"],"additionalProperties":false}}}
+  }'
+# choices[0].message.content is {"headline":"...","topics":["..."]}
+```
+
+### Gemini-native endpoints (`/v1beta`)
+
+A client that speaks the Gemini API (SDK with a custom base URL, or plain REST) can use the bridge directly.
+
+| Endpoint | Notes |
+|---|---|
+| `GET /v1beta/models` | `{"models":[{name, displayName, description, inputTokenLimit, outputTokenLimit, supportedGenerationMethods, thinking, baseModelId?}]}` |
+| `GET /v1beta/models/{model}` | One entry; `404 NOT_FOUND` for an unknown model |
+| `POST /v1beta/models/{model}:generateContent` | One JSON response |
+| `POST /v1beta/models/{model}:streamGenerateContent` | `?alt=sse`: `text/event-stream`, one `data: {GenerateContentResponse}` frame per update. Without `alt=sse`: a JSON array of the same objects (Google's default) |
+
+- **Auth**: the bridge API key in the `x-goog-api-key` header or the `?key=` query parameter (`Authorization: Bearer` and
+  `x-api-key` work too). Missing key: `401 UNAUTHENTICATED`; wrong key: `403 PERMISSION_DENIED`.
+- **Models**: the ids in the mapping table below, with or without the `models/` prefix. `inputTokenLimit` /
+  `outputTokenLimit` are the nominal Google numbers (1048576 / 65536), advisory only: the bridge enforces
+  `max_prompt_bytes` and never cuts output. The list shows what is usable right now (the thinking variants need a cookie).
+- **Request** (camelCase JSON): `contents[]` (`role` `user` / `model`; parts `text`, `inlineData{mimeType,data}`,
+  `fileData{mimeType,fileUri}`), `systemInstruction`, `generationConfig{responseMimeType, responseJsonSchema |
+  responseSchema, thinkingConfig{thinkingLevel, thinkingBudget, includeThoughts}, candidateCount: 1}`. `temperature`,
+  `topP`, `topK`, `maxOutputTokens`, `stopSequences`, `safetySettings` are accepted and ignored. Not available:
+  `tools` / function calling and code-execution parts (`400 INVALID_ARGUMENT`), `candidateCount > 1`,
+  `responseMimeType` other than `text/plain` / `application/json`, Files API / `gs://` URIs in `fileData` (only
+  http(s) links the bridge can fetch are accepted; otherwise send the bytes as `inlineData`), and the other methods
+  (`countTokens`, `embedContent`, ...).
+- **Response**: `candidates[0]` = `{content:{role:"model", parts:[{text}]}, finishReason:"STOP", index:0}`, plus
+  `usageMetadata{promptTokenCount, candidatesTokenCount, totalTokenCount, thoughtsTokenCount?}`, `modelVersion` (the
+  model actually served, for example `gemini-3.6-flash-thinking`) and `responseId`. With
+  `thinkingConfig.includeThoughts: true` and a thinking model that produced thoughts, the thought text comes first as a
+  part `{text, thought:true}`; otherwise thoughts are hidden (they still count in `thoughtsTokenCount`). Token counts
+  use the same tokenizer as the rest of the bridge.
+- **Errors** are Google-shaped, `{"error":{"code","message","status","details":[ErrorInfo]}}`, with the HTTP mapping of
+  the OpenAI routes: `429 RESOURCE_EXHAUSTED` (+ `Retry-After`), `503 UNAVAILABLE`, `400 INVALID_ARGUMENT`,
+  `404 NOT_FOUND`, `413` for oversized input. The bridge's own class (`upstream_rate_limited`, `upstream_unavailable`,
+  `upstream_protocol_changed`, `no_valid_account`, `upstream_invalid_json`, ...) is `error.details[0].reason`. After a
+  stream has started the error is sent as a final frame instead.
+
+```bash
+# Plain request
+curl -s "http://localhost:8083/v1beta/models/gemini-3.6-flash:generateContent" \
+  -H "x-goog-api-key: $KEY" -H "Content-Type: application/json" \
+  -d '{
+    "systemInstruction": {"parts":[{"text":"Answer in one sentence."}]},
+    "contents": [{"role":"user","parts":[{"text":"What is a budget deficit?"}]}]
+  }'
+# {"candidates":[{"content":{"role":"model","parts":[{"text":"..."}]},"finishReason":"STOP","index":0}],
+#  "usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":24,"totalTokenCount":36},
+#  "modelVersion":"gemini-3.6-flash","responseId":"..."}
+
+# Thinking + JSON schema + streaming (SSE)
+curl -sN "http://localhost:8083/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse&key=$KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "contents": [{"role":"user","parts":[{"text":"Classify: markets rallied after the rate decision."}]}],
+    "generationConfig": {
+      "thinkingConfig": {"thinkingLevel":"HIGH","includeThoughts":true},
+      "responseMimeType": "application/json",
+      "responseSchema": {"type":"OBJECT","properties":{"topic":{"type":"STRING"},"sentiment":{"type":"STRING","enum":["positive","neutral","negative"]}},"required":["topic","sentiment"]}
+    }
+  }'
+# data: {"candidates":[{"content":{"role":"model","parts":[{"text":"{\"topic\":...}"}]},"finishReason":"STOP","index":0}],"usageMetadata":{...},"modelVersion":"gemini-3.8-flash-thinking",...}
+```
+
+### Model and thinking mapping
+
+One table in code (`internal/app/model_route.go`) serves both API styles. Every real upstream model has a plain id and a
+`-thinking` sibling (the web app's extended thinking, which also emits `reasoning_content` on `/v1/chat/completions`).
+
+| Request | Served model |
+|---|---|
+| `gemini-3.6-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-pro`, `gemini-3.8-flash`, `gemini-4-argon` (also `gemini-3.7-flash`, an alias of 3.8; each with or without the `models/` prefix) | the same id |
+| any of them + `thinkingLevel` `HIGH` or `MEDIUM` | `<id>-thinking` |
+| any of them + `thinkingBudget` > 0 | `<id>-thinking` |
+| any of them + `reasoning_effort` (chat) / `reasoning.effort` (responses) `high` or `medium` | `<id>-thinking` |
+| any of them + `thinkingLevel` `LOW` / `MINIMAL`, `thinkingBudget` 0 or -1, effort `low` / `minimal` / `none`, or nothing | the plain id |
+| `<id>-thinking` (named explicitly) | kept, whatever the thinking settings say |
+| anything else | unknown: `404 NOT_FOUND` on `/v1beta`, `400` on the OpenAI routes |
+
+If both `thinkingLevel` and `thinkingBudget` are sent the level wins. The thinking variants (and `gemini-3.1-pro`,
+`gemini-3.8-flash`, `gemini-4-argon`) need a signed-in cookie, exactly as before; without one the request fails with `503
+no_valid_account` instead of being silently downgraded. The media models (`gemini-image`, `gemini-music`, `gemini-video`,
+`gemini-canvas`) stay OpenAI-route only and ignore thinking settings. `GET /v1/models` marks every entry with `thinking`
+and links the pair with `thinking_variant` / `base_model`; `GET /v1beta/models` has `thinking` and `baseModelId`.
+
+### Files, video and audio
+
+Inline files are accepted on both API styles and uploaded as attachments of the request (signed-in accounts only; with
+an empty pool the request fails fast with `503 no_valid_account`).
+
+| Part | Where |
+|---|---|
+| `image_url`, `input_image`, `video_url`, `input_video` (data URL or http(s) link) | chat / responses (unchanged) |
+| `{"type":"file","file":{"file_data":"data:<mime>;base64,...","filename"}}` | chat |
+| `{"type":"input_file","file_data":"data:<mime>;base64,...","filename"}` or `"file_url"` (http(s)) | responses |
+| `{"type":"input_audio","input_audio":{"data":"<base64>","format":"wav"}}` | chat (the old blanket rejection is gone) |
+| `inlineData{mimeType,data}`, `fileData{mimeType,fileUri: http(s)}` | `/v1beta` |
+
+Bare base64 (no `data:` prefix) needs a `filename` with a known extension. `file_id` references are rejected: there is no
+file store.
+
+The attachment kind (the type slot of the upload tuple, which decides how Google parses the file) follows the MIME type:
+
+| MIME | Kind | Cap | Name shown to the model |
+|---|---|---|---|
+| `image/*` | 1 | 12 MB | `image<N>.<ext>` |
+| `video/*` | 2 | 50 MB | `video<N>.<ext>` |
+| `text/*`, `audio/*`, `application/pdf`, `application/json`, `application/xml`, `application/rtf`, `application/x-ndjson`, YAML, JavaScript, Word / Excel / PowerPoint (legacy and OOXML), OpenDocument | 3 (with the real mime) | 50 MB | the client's `filename` (extension added if missing), else `file<N>.<ext>` |
+
+Anything else (zip, executables, `application/octet-stream`, unknown type) is `400` with `code: unsupported_input`
+(`INVALID_ARGUMENT` on `/v1beta`); a file over its cap is `413` with `code: attachment_too_large`. Remote links are
+downloaded by the bridge with the same caps.
+
+Kinds 1 and 2 are the proven protocol (browser captures). **That Google's web app reads PDF, audio and office files
+sent as kind 3 with their real MIME type is to be verified live; it cannot be tested offline.** If Google rejects a type,
+the request fails with the normal upstream error classes.
+
+`/v1/responses` now keeps the content parts of user messages (previously they were flattened to text, which dropped
+`input_image` / `input_file` before they could be uploaded).
+
+### Long prompts
+
+The `max_prompt_bytes` behaviour is unchanged: a prompt over the budget is uploaded as the text attachment `message.txt`
+and the request carries a short instruction plus the latest message. It works the same on `/v1beta`, and in the JSON repair
+round (whose prompt also holds the invalid answer): the repair is uploaded as its own `message.txt` on the same account.
+Without a cookie an over-long prompt is still `400 context_length_exceeded`.
 
 ## Acknowledgments
 

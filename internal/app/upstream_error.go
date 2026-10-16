@@ -325,13 +325,21 @@ func writeBodyReadError(w http.ResponseWriter, err error) {
 	writeJSONError(w, http.StatusBadRequest, "invalid_request_error", "", err.Error())
 }
 
-// writeRejection answers a request that failed local validation before reaching
-// Google. A classified error (e.g. "no valid account" for a login-only model)
-// keeps its class; everything else is a client mistake: 400.
-func writeRejection(w http.ResponseWriter, err error) {
-	if upstreamClassOf(err) != "" {
-		writeAPIError(w, apiErrorFor(err))
-		return
+// apiErrorForRejection maps a request that failed local validation before
+// reaching Google. A clientError (unsupported or oversized attachment) keeps its
+// status (400 / 413); a classified error (e.g. "no valid account" for a
+// login-only model) keeps its class; everything else is a client mistake: 400.
+func apiErrorForRejection(err error) apiError {
+	if ce, ok := errorAsClient(err); ok {
+		return apiError{Status: ce.Status, Type: "invalid_request_error", Code: ce.Code, Message: ce.Msg}
 	}
-	writeJSONError(w, http.StatusBadRequest, "invalid_request_error", "", err.Error())
+	if upstreamClassOf(err) != "" {
+		return apiErrorFor(err)
+	}
+	return apiError{Status: http.StatusBadRequest, Type: "invalid_request_error", Message: err.Error()}
+}
+
+// writeRejection answers such a request on the OpenAI routes.
+func writeRejection(w http.ResponseWriter, err error) {
+	writeAPIError(w, apiErrorForRejection(err))
 }

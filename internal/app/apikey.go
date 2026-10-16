@@ -117,7 +117,7 @@ func requireAPIKey(next http.HandlerFunc) http.HandlerFunc {
 		if got == "" {
 			got = strings.TrimSpace(r.Header.Get("x-api-key"))
 		}
-		if got == "" || subtle.ConstantTimeCompare([]byte(got), []byte(key)) != 1 {
+		if !apiKeyMatches(got, key) {
 			writeJSON(w, 401, map[string]interface{}{
 				"error": map[string]string{
 					"message": "Invalid API key. Set Authorization: Bearer <key> or x-api-key header.",
@@ -129,6 +129,13 @@ func requireAPIKey(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+// apiKeyMatches compares a presented key with the bridge key in constant time.
+// Shared by the OpenAI routes (requireAPIKey) and the /v1beta routes
+// (requireGeminiKey).
+func apiKeyMatches(got, key string) bool {
+	return got != "" && subtle.ConstantTimeCompare([]byte(got), []byte(key)) == 1
 }
 
 // helpers ────────────────────────────────────────────────────────────────────

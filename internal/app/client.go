@@ -93,7 +93,11 @@ func getTLSGenClient() tls_client.HttpClient {
 // cachedTLSClient builds (once per key) a tls-client. timeoutSec == 0 means no
 // total timeout. WithDialer carries the TCP keepalive; tls-client overwrites the
 // dialer's connect timeout with timeoutSec (0 = bounded by the request context).
+//
+// The timeout is part of the cache key: a changed request_timeout_sec (admin panel)
+// takes effect, and the first caller no longer fixes the timeout for everyone.
 func cachedTLSClient(key string, timeoutSec int) tls_client.HttpClient {
+	key = fmt.Sprintf("%s|%ds", key, timeoutSec)
 	clientCacheMu.RLock()
 	if c, ok := clientCache[key]; ok {
 		clientCacheMu.RUnlock()

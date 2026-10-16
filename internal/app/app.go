@@ -114,6 +114,9 @@ func Run() {
 			writeJSON(w, 405, map[string]string{"error": "method not allowed"})
 		}
 	}))
+	// Gemini-native routes (list, get, generateContent, streamGenerateContent), see gemini_api.go.
+	mux.HandleFunc("/v1beta/models", requireGeminiKey(handleGeminiModels))
+	mux.HandleFunc("/v1beta/models/", requireGeminiKey(handleGeminiModels))
 	// /v1/videos —— OpenAI(Sora) 形状的异步视频生成。POST 建任务，GET 轮询，GET .../content 下 MP4。
 	mux.HandleFunc("/v1/videos", requireAPIKey(handleCreateVideo))
 	mux.HandleFunc("/v1/videos/", requireAPIKey(handleVideoItem))

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,15 +22,28 @@ func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 }
 
 func handleModels(w http.ResponseWriter, r *http.Request) {
+	avail := availableModels()
 	var data []map[string]interface{}
-	for name, c := range availableModels() {
-		data = append(data, map[string]interface{}{
+	for _, name := range sortedModelNames() {
+		c := avail[name]
+		entry := map[string]interface{}{
 			"id":          name,
 			"object":      "model",
 			"created":     1700000000,
 			"owned_by":    "google",
 			"description": c.Desc,
-		})
+			"thinking":    c.Thinking,
+		}
+		// Thinking mapping (see model_route.go): a plain family model names its
+		// thinking sibling, a thinking variant names the plain one.
+		if v := thinkingVariantOf(name); v != "" {
+			if _, ok := avail[v]; ok {
+				entry["thinking_variant"] = v
+			}
+		} else if _, thinking, ok := familyOf(name); ok && thinking {
+			entry["base_model"] = strings.TrimSuffix(name, thinkingSuffix)
+		}
+		data = append(data, entry)
 	}
 	writeJSON(w, 200, map[string]interface{}{"object": "list", "data": data})
 }
@@ -87,11 +101,11 @@ func buildUsageWithReasoning(prompt, text, reasoning string, responsesAPI bool) 
 	return u
 }
 
-// rejectUnsupported 检查客户端传了但我们兑现不了的字段。
-//
-// 只拦"静默忽略会让客户端拿到错误结果"的：n>1 少给候选、图片输入被丢掉会
-// 让模型答非所问。采样类参数（temperature/top_p/max_tokens/...）上游根本
-// 没有对应旋钮，收下忽略即可，报错反而会挡住正常客户端。
+// rejectUnsupported refuses what the bridge cannot honour and would otherwise
+// drop silently: n>1 (a single candidate comes back) and attachments without a
+// signed-in account (the web app rejects references to anonymous uploads).
+// Sampling parameters (temperature, top_p, max_tokens, ...) have no upstream
+// knob; they are accepted and ignored, and output is never cut.
 func rejectUnsupported(req map[string]interface{}, messages []map[string]interface{}) error {
 	if n, ok := req["n"].(float64); ok && n > 1 {
 		return fmt.Errorf("n=%d not supported: upstream returns a single candidate", int(n))
@@ -103,31 +117,50 @@ func rejectUnsupported(req map[string]interface{}, messages []map[string]interfa
 		}
 		for _, c := range parts {
 			cm, ok := c.(map[string]interface{})
-			if !ok {
+			if !ok || !isAttachmentPart(getStr(cm, "type")) {
 				continue
 			}
-			switch getStr(cm, "type") {
-			case "image_url", "input_image":
-				// 有 cookie 就能收：图会被上传成附件再引用。匿名不行 —— 传得上去，
-				// 但一引用就被服务端拒，收下只会让客户端拿到一个看不懂的失败。
-				if !hasCookie() {
-					return fmt.Errorf("image input needs a Google account cookie: anonymous " +
-						"uploads succeed but referencing them in a conversation is rejected " +
-						"upstream. Add a cookie in the admin panel (Cookie pool)")
-				}
-			case "video_url", "input_video":
-				// 视频跟图片同理：登录态才能引用，匿名一引用就 1100。
-				if !hasCookie() {
-					return fmt.Errorf("video input needs a Google account cookie: anonymous " +
-						"uploads succeed but referencing them in a conversation is rejected " +
-						"upstream. Add a cookie in the admin panel (Cookie pool)")
-				}
-			case "input_audio":
-				return fmt.Errorf("audio input not supported")
+			if !hasCookie() {
+				return errNoAccount("no valid account: image, video and file input needs a Google account cookie: " +
+					"anonymous uploads succeed but referencing them in a conversation is rejected " +
+					"upstream. Add a cookie in the admin panel (Cookie pool)")
 			}
+			return nil
 		}
 	}
 	return nil
+}
+
+// generationJob is one client request ready to be sent to Google.
+type generationJob struct {
+	Messages    []map[string]interface{}
+	Prompt      string
+	Latest      string
+	Model       ModelConfig
+	Tools       []map[string]interface{}
+	ToolChoice  interface{}
+	Attachments []pendingUpload
+	JSON        *jsonSpec // non-nil: structured output (buffered, no tools, single-turn)
+}
+
+// runGeneration is the single entry from the API handlers to Google. JSON
+// requests are buffered and may run a repair round; everything else streams
+// through onDelta/onReasoning as before.
+func runGeneration(ctx context.Context, j generationJob, onDelta, onReasoning func(string)) (string, []ToolCall, *StreamResult, error) {
+	if j.JSON != nil {
+		text, res, err := runJSONMode(ctx, j.JSON, j.Prompt, j.Latest,
+			func(ctx context.Context, prompt, latest string) (string, *StreamResult, error) {
+				t, _, res, err := callGemini(ctx, prompt, latest, j.Model, nil, j.Attachments, nil, nil)
+				return t, res, err
+			})
+		return text, nil, res, err
+	}
+	if rtCfg().MultiTurn && len(j.Attachments) == 0 && j.Model.Tool == 0 {
+		// Multi-turn: continue a known conversation by its history prefix and send
+		// only the new message. Tools work on this path too.
+		return callGeminiConv(ctx, j.Messages, j.Model, j.Tools, j.ToolChoice, onDelta, onReasoning)
+	}
+	return callGemini(ctx, j.Prompt, j.Latest, j.Model, j.Tools, j.Attachments, onDelta, onReasoning)
 }
 
 func callGemini(ctx context.Context, prompt, latest string, mc ModelConfig, tools []map[string]interface{},
@@ -237,7 +270,7 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if modelInput == "" {
 		modelInput = rtCfg().DefaultModel
 	}
-	modelName, modelCfg, err := resolveModel(modelInput)
+	modelName, modelCfg, err := routeModel(modelInput, thinkingFromEffort(getStr(req, "reasoning_effort")))
 	if err != nil {
 		writeRejection(w, err)
 		return
@@ -264,8 +297,18 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 图片先解出来带着，真正上传要等挑完账号和出口（见 streamGenerate）。
-	images, err := collectImages(messages, "")
+	jspec, err := jsonSpecFromChat(req)
+	if err != nil {
+		writeRejection(w, err)
+		return
+	}
+	if jspec != nil && len(tools) > 0 {
+		writeRejection(w, errors.New("response_format cannot be combined with tools"))
+		return
+	}
+
+	// Attachments are decoded now; the upload waits for the account and egress (see streamGenerateWithFiles).
+	images, err := collectAttachments(messages, "")
 	if err != nil {
 		writeRejection(w, err)
 		return
@@ -295,7 +338,11 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if stream {
 		sse = newSSEWriter(w, cid, created, modelName)
 		onReasoning = sse.SendReasoning
-		if len(tools) == 0 {
+		if jspec != nil {
+			// JSON mode is buffered: the answer is validated (and possibly repaired)
+			// before anything is sent, then written in one piece below.
+			onReasoning = nil
+		} else if len(tools) == 0 {
 			onDelta = sse.SendContent
 		} else {
 			gate = newToolFenceGate(sse.SendContent)
@@ -306,12 +353,10 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	var text string
 	var toolCalls []ToolCall
 	var res *StreamResult
-	if rtCfg().MultiTurn && len(images) == 0 && modelCfg.Tool == 0 {
-		// 多轮：按历史前缀识别续接，命中就只发新消息、历史留服务端。带 tools 也走这条。
-		text, toolCalls, res, err = callGeminiConv(r.Context(), messages, modelCfg, tools, req["tool_choice"], onDelta, onReasoning)
-	} else {
-		text, toolCalls, res, err = callGemini(r.Context(), prompt, latest, modelCfg, tools, images, onDelta, onReasoning)
-	}
+	text, toolCalls, res, err = runGeneration(r.Context(), generationJob{
+		Messages: messages, Prompt: prompt, Latest: latest, Model: modelCfg, Tools: tools,
+		ToolChoice: req["tool_choice"], Attachments: images, JSON: jspec,
+	}, onDelta, onReasoning)
 	if err != nil {
 		ae := apiErrorFor(err)
 		recordRequest("chat.completions", modelName, prompt, "", res, ae.Status, err.Error(), stream)
@@ -439,7 +484,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	if modelInput == "" {
 		modelInput = rtCfg().DefaultModel
 	}
-	modelName, modelCfg, err := resolveModel(modelInput)
+	modelName, modelCfg, err := routeModel(modelInput, thinkingFromEffort(responsesEffort(req)))
 	if err != nil {
 		writeRejection(w, err)
 		return
@@ -512,7 +557,12 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 					if role == "" {
 						role = "user"
 					}
-					content := contentToString(item["content"])
+					// Keep content parts as they are: input_image / input_file / input_audio
+					// next to the text parts are attachments (contentToString reads the text).
+					var content interface{} = contentToString(item["content"])
+					if cp, ok := item["content"].([]interface{}); ok {
+						content = cp
+					}
 					messages = append(messages, map[string]interface{}{"role": role, "content": content})
 				}
 			}
@@ -546,7 +596,17 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	images, err := collectImages(messages, "")
+	jspec, err := jsonSpecFromResponses(req)
+	if err != nil {
+		writeRejection(w, err)
+		return
+	}
+	if jspec != nil && len(tools) > 0 {
+		writeRejection(w, errors.New("text.format cannot be combined with tools"))
+		return
+	}
+
+	images, err := collectAttachments(messages, "")
 	if err != nil {
 		writeRejection(w, err)
 		return
@@ -631,8 +691,10 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 				"delta":         d,
 			})
 		}
-		// 跟 chat 那条路同一套围栏闸门：带 tools 时只放行确定不在围栏里的部分。
-		if len(tools) == 0 {
+		// Same fence gate as the chat route; JSON mode is buffered, nothing streams live.
+		if jspec != nil {
+			onDelta = nil
+		} else if len(tools) == 0 {
 			onDelta = emitDelta
 		} else {
 			gate = newToolFenceGate(emitDelta)
@@ -645,11 +707,10 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	var text string
 	var toolCalls []ToolCall
 	var res *StreamResult
-	if rtCfg().MultiTurn && len(images) == 0 && modelCfg.Tool == 0 {
-		text, toolCalls, res, err = callGeminiConv(r.Context(), messages, modelCfg, tools, req["tool_choice"], onDelta, nil)
-	} else {
-		text, toolCalls, res, err = callGemini(r.Context(), prompt, latest, modelCfg, tools, images, onDelta, nil)
-	}
+	text, toolCalls, res, err = runGeneration(r.Context(), generationJob{
+		Messages: messages, Prompt: prompt, Latest: latest, Model: modelCfg, Tools: tools,
+		ToolChoice: req["tool_choice"], Attachments: images, JSON: jspec,
+	}, onDelta, nil)
 	if err != nil {
 		ae := apiErrorFor(err)
 		recordRequest("responses", modelName, prompt, "", res, ae.Status, err.Error(), stream)
@@ -770,4 +831,10 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		"output":     output,
 		"usage":      buildUsage(prompt, text, true),
 	})
+}
+
+// responsesEffort reads reasoning.effort of a /v1/responses request.
+func responsesEffort(req map[string]interface{}) string {
+	r, _ := req["reasoning"].(map[string]interface{})
+	return getStr(r, "effort")
 }

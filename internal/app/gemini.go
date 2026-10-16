@@ -191,10 +191,16 @@ func resolveModel(modelName string) (string, ModelConfig, error) {
 					"%s. Add a cookie in the admin panel (Cookie pool) or via --cookie-file to enable it",
 				modelName, downgrade)
 		}
-		return "", ModelConfig{}, fmt.Errorf("unknown model: %s", modelName)
+		return "", ModelConfig{}, &unknownModelError{Name: modelName}
 	}
 	return modelName, mc, nil
 }
+
+// unknownModelError is a model id the bridge does not serve. The OpenAI routes
+// answer it with 400, the Gemini routes with 404 NOT_FOUND.
+type unknownModelError struct{ Name string }
+
+func (e *unknownModelError) Error() string { return "unknown model: " + e.Name }
 
 // StreamResult holds raw body + per-request proxy + timing info.
 type StreamResult struct {
@@ -316,6 +322,23 @@ func streamGenerate(ctx context.Context, prompt, latest string, mc ModelConfig,
 	return streamGenerateWithFiles(ctx, prompt, latest, mc, nil, onDelta, onReasoning)
 }
 
+// preferredAccountKey carries "use this cookie account if you can" through the
+// context, so a second Google call belonging to the same client request (the JSON
+// repair) runs on the account of the first call.
+type preferredAccountKey struct{}
+
+func withPreferredAccount(ctx context.Context, accountID int64) context.Context {
+	if accountID <= 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, preferredAccountKey{}, accountID)
+}
+
+func preferredAccountID(ctx context.Context) int64 {
+	id, _ := ctx.Value(preferredAccountKey{}).(int64)
+	return id
+}
+
 // fileRef 是一个已上传附件的引用。
 type fileRef struct {
 	Ref  string // 上传返回的路径，形如 /contrib_service/ttl_1d/…
@@ -347,8 +370,17 @@ func streamGenerateWithFiles(ctx context.Context, prompt, latest string, mc Mode
 	// 带附件（图/视频）时不能走匿名——下面 uploadBytes 那段会因 cookieStr=="" 直接报错。
 	var acct *CookieAccount
 	if !anonFirstEligible(mc, len(pending) > 0) {
-		if a, ok := pickCookieAccount(); ok {
-			acct = a
+		// A follow-up round of one request (the JSON repair) asks for the account
+		// the first round used; if it is gone or disabled the normal pick applies.
+		if id := preferredAccountID(ctx); id > 0 {
+			if a := accountByID(id); a != nil && a.Status == "enabled" {
+				acct = a
+			}
+		}
+		if acct == nil {
+			if a, ok := pickCookieAccount(); ok {
+				acct = a
+			}
 		}
 	}
 	preferProxy := int64(0)
@@ -459,20 +491,23 @@ func streamGenerateWithFiles(ctx context.Context, prompt, latest string, mc Mode
 				"rejected upstream. Add a cookie in the admin panel (Cookie pool)"))
 		}
 
-		nImg, nVid := 0, 0
+		nImg, nVid, nFile := 0, 0, 0
 		for _, u := range pending {
 			ref, uerr := uploadBytes(cookieStr, proxyURL, u.Data, u.Name)
 			if uerr != nil {
 				return attrib(fmt.Errorf("上传附件 %s 失败: %w", u.Name, uerr))
 			}
 			files = append(files, fileRef{Ref: ref, Name: u.Name, Kind: u.Kind, Mime: u.Mime})
-			if u.Kind == 2 {
-				nVid++
-			} else {
+			switch u.Kind {
+			case 1:
 				nImg++
+			case 2:
+				nVid++
+			default:
+				nFile++
 			}
 		}
-		logf("[vision] 上传了 %d 张图 / %d 个视频", nImg, nVid)
+		logf("[vision] uploaded %d image(s) / %d video(s) / %d file(s)", nImg, nVid, nFile)
 	}
 
 	// prompt 超长时转成文本附件。要等挑完号和出口才能做：上传要 cookie，

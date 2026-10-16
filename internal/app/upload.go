@@ -13,7 +13,8 @@ import (
 
 // 两步 resumable，对齐浏览器抓包。也存在单次 multipart 打 content-push.googleapis.com
 // 那条路（同样能传成功），选两步只为跟浏览器一致。
-const uploadHost = "https://push.clients6.google.com/upload/"
+// A variable only so tests can point uploads at a local server.
+var uploadHost = "https://push.clients6.google.com/upload/"
 
 // uploadBytes 上传字节，返回引用路径（形如 /contrib_service/ttl_1d/…）。上传不带 mime。
 //
