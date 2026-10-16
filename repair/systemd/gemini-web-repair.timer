@@ -1,0 +1,10 @@
+[Unit]
+Description=Check the Gemini web bridge canary and start the self-repair job when it fails
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=2min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,14 @@
+[Unit]
+Description=Gemini web bridge self-repair (starts the repair container only when the canary fails)
+Wants=docker.service
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/gemini-web-repair.env
+ExecStart=/opt/gemini-web2api/repair/systemd/check-and-repair.sh
+# The container needs a minute or two for Chromium plus the bridge's own validation canary.
+TimeoutStartSec=300
+# 2 = learned but not validated by the bridge; the event log already records it.
+SuccessExitStatus=2
+Nice=10
