@@ -316,3 +316,26 @@ func TestLabInstructionsTellNotToWrap(t *testing.T) {
 		t.Errorf("repair instruction: %s", rep)
 	}
 }
+
+// The newsroom normalizer sends {"schema": {...}, "input": ...}; the web model
+// answered {"schema": {...filled...}} (VPS lab, 17 Oct 2026). The prompt names
+// "schema", but only as its own envelope, so the echo is unwrapped.
+func TestUnwrapEchoedPromptContainer(t *testing.T) {
+	prompt := `User request:
+{"schema":{"source":{},"story":{},"evidence":[],"selection":{},"owner_policy":{},"routing":{}},"input":{"title":"x"}}`
+	answer := `{"schema":{"source":{"a":1},"story":{"b":2},"evidence":[],"selection":{},"owner_policy":{},"routing":{}}}`
+	got, ok := unwrapWrapper(answer, prompt)
+	if !ok || !strings.HasPrefix(got, `{"source":`) {
+		t.Fatalf("echoed container must be unwrapped: ok=%v %s", ok, got)
+	}
+	// A prompt that asks for a "schema" output field keeps the answer as it is.
+	asks := `Return JSON with a required field "schema": an object describing the table.`
+	if _, ok := unwrapWrapper(`{"schema":{"columns":[],"name":"t","rows":3}}`, asks); ok {
+		t.Fatal("a requested schema field must not be unwrapped")
+	}
+	// Few shared fields with the prompt's container: not an echo.
+	other := `{"schema":{"x":1,"y":2,"z":3}}`
+	if _, ok := unwrapWrapper(other, prompt); ok {
+		t.Fatal("an object that does not echo the prompt container must stay wrapped")
+	}
+}

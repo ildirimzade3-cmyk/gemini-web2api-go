@@ -229,7 +229,10 @@ func unwrapWrapper(clean, prompt string) (string, bool) {
 			continue
 		}
 		inner := strings.TrimSpace(string(raw))
-		if !strings.HasPrefix(inner, "{") || promptNamesKey(prompt, key) {
+		if !strings.HasPrefix(inner, "{") {
+			return clean, false
+		}
+		if promptNamesKey(prompt, key) && !echoesPromptContainer(prompt, key, inner) {
 			return clean, false
 		}
 		var buf bytes.Buffer
@@ -239,6 +242,48 @@ func unwrapWrapper(clean, prompt string) (string, bool) {
 		return buf.String(), true
 	}
 	return clean, false
+}
+
+// echoesPromptContainer reports whether the answer filled a container the
+// prompt itself sent: the prompt carries `"key": {...}` (e.g. the newsroom
+// normalizer sends {"schema": {...}, "input": ...}) and the answer's object
+// under that key has mostly the same fields. Then the key is the prompt's
+// envelope, not a requested output field, and the answer is unwrapped.
+func echoesPromptContainer(prompt, key, inner string) bool {
+	var answer map[string]json.RawMessage
+	if json.Unmarshal([]byte(inner), &answer) != nil || len(answer) < 3 {
+		return false
+	}
+	needle := `"` + key + `"`
+	for from := 0; ; {
+		i := strings.Index(prompt[from:], needle)
+		if i < 0 {
+			return false
+		}
+		pos := from + i + len(needle)
+		from = pos
+		rest := strings.TrimLeft(prompt[pos:], " \t\r\n")
+		if !strings.HasPrefix(rest, ":") {
+			continue
+		}
+		rest = strings.TrimLeft(rest[1:], " \t\r\n")
+		if !strings.HasPrefix(rest, "{") {
+			continue
+		}
+		var sent map[string]json.RawMessage
+		if json.NewDecoder(strings.NewReader(rest)).Decode(&sent) != nil || len(sent) == 0 {
+			continue
+		}
+		shared := 0
+		for k := range sent {
+			if _, ok := answer[k]; ok {
+				shared++
+			}
+		}
+		if shared*10 >= len(sent)*6 {
+			return true
+		}
+	}
 }
 
 // extractJSON cuts the outermost JSON value out of an answer: a surrounding
