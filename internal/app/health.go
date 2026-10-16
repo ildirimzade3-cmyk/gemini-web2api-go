@@ -95,6 +95,14 @@ func runCanary(ctx context.Context) (res CanaryResult, started bool) {
 	prev := loadLastCanary()
 	t0 := time.Now()
 	text, sres, err := canaryGenerate(ctx)
+	// A web model occasionally answers the fixed prompt with something else
+	// (seen once in the 17 Oct VPS repair run). One immediate re-ask keeps a
+	// single odd answer from failing the canary or rolling back a repair; a
+	// transport or protocol error is reported as it is.
+	if err == nil && !strings.Contains(strings.ToLower(text), canaryWantSubstr) {
+		logf("[canary] unexpected answer (%d chars), asking once more", len([]rune(text)))
+		text, sres, err = canaryGenerate(ctx)
+	}
 	res = CanaryResult{At: t0.Unix(), LatencyMs: time.Since(t0).Milliseconds()}
 
 	switch {

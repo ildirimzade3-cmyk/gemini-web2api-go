@@ -425,3 +425,40 @@ func TestServerTimeoutsAndBodyCap(t *testing.T) {
 		t.Errorf("server handler did not cap the body: %d", rec.Code)
 	}
 }
+
+func TestCanaryReasksOnceAfterAnOddAnswer(t *testing.T) {
+	withRuntime(t, nil)
+	isolateHealthState(t)
+	calls := 0
+	stubCanary(t, func(ctx context.Context) (string, *StreamResult, error) {
+		calls++
+		if calls == 1 {
+			return "Hello! How can I help you today?", nil, nil
+		}
+		return "pong", nil, nil
+	})
+	res, started := runCanary(context.Background())
+	if !started || !res.OK || calls != 2 {
+		t.Fatalf("one odd answer must be re-asked once: started=%v calls=%d %+v", started, calls, res)
+	}
+
+	calls = 0
+	stubCanary(t, func(ctx context.Context) (string, *StreamResult, error) {
+		calls++
+		return "something else", nil, nil
+	})
+	res, _ = runCanary(context.Background())
+	if res.OK || res.ErrorClass != canaryWrongAnswer || calls != 2 {
+		t.Fatalf("two odd answers fail with %q after exactly two asks: calls=%d %+v", canaryWrongAnswer, calls, res)
+	}
+
+	calls = 0
+	stubCanary(t, func(ctx context.Context) (string, *StreamResult, error) {
+		calls++
+		return "", nil, newUpstreamError(ClassRateLimited, 429, "upstream HTTP 429: x")
+	})
+	res, _ = runCanary(context.Background())
+	if res.OK || calls != 1 {
+		t.Fatalf("an upstream error is not re-asked: calls=%d %+v", calls, res)
+	}
+}
