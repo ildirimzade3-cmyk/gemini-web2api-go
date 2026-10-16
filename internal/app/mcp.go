@@ -183,10 +183,13 @@ func webSearchToolDef() map[string]interface{} {
 
 // mcpWebSearch 执行一次联网搜索，返回"答案 + 来源清单"的文本。
 func mcpWebSearch(ctx context.Context, query string) (string, error) {
-	mc, ok := Models[rtCfg().DefaultModel]
+	name := rtCfg().DefaultModel
+	mc, ok := Models[name]
 	if !ok {
-		mc = Models["gemini-3.6-flash"]
+		name = "gemini-3.6-flash"
+		mc = Models[name]
 	}
+	mc = decorateModel(name, mc)
 	res, err := streamGenerate(ctx, query, query, mc, nil, nil)
 	if err != nil {
 		return "", err

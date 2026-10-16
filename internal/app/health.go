@@ -181,7 +181,21 @@ type healthStatus struct {
 	// XSRFOKLast is whether the most recent login-token fetch worked; null if none yet.
 	XSRFOKLast *bool         `json:"xsrf_ok_last"`
 	LastCanary *CanaryResult `json:"last_canary"`
-	Problems   []string      `json:"problems,omitempty"`
+	// LastRepair is the outcome of the most recent self-repair report (repair.go); null if none.
+	LastRepair *LastRepair `json:"last_repair"`
+	// BrowserFallback: whether the browser transport is configured and when it last answered.
+	BrowserFallback struct {
+		Configured bool   `json:"configured"`
+		LastUsedAt *int64 `json:"last_used_at"` // unix seconds since this process started; null = not yet
+	} `json:"browser_fallback"`
+	// Transport says which path answered lately (process-local counters, null = no data yet).
+	Transport struct {
+		DirectOKLast    *bool `json:"direct_ok_last"`    // the last direct attempt worked
+		BrowserUsedLast *bool `json:"browser_used_last"` // the last answer came from the browser
+		BrowserAnswers  int64 `json:"browser_answers"`   // browser answers since start
+		DirectAnswers   int64 `json:"direct_answers"`    // direct answers since start
+	} `json:"transport"`
+	Problems []string `json:"problems,omitempty"`
 }
 
 // buildHealth assembles the report and the HTTP status: 200 when at least one
@@ -194,6 +208,8 @@ func buildHealth() (int, healthStatus) {
 	h.BL.ValueAgeSeconds, h.BL.Source = blStatus()
 	h.XSRFOKLast = xsrfLastOK()
 	h.LastCanary = loadLastCanary()
+	h.LastRepair = loadLastRepair()
+	fillTransportHealth(&h)
 
 	anon := h.Accounts.Total == 0 || rtCfg().FallbackAnon
 	if h.Accounts.Healthy == 0 && !anon {
@@ -218,4 +234,30 @@ func handleHealthz(w http.ResponseWriter, r *http.Request) {
 	code, h := buildHealth()
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, code, h)
+}
+
+// fillTransportHealth reports the browser fallback and the transport counters.
+func fillTransportHealth(h *healthStatus) {
+	h.BrowserFallback.Configured = browserFallbackURL() != ""
+	if at := transportStats.browserLastUsed.Load(); at > 0 {
+		h.BrowserFallback.LastUsedAt = &at
+	}
+	switch transportStats.directState.Load() {
+	case 1:
+		t := true
+		h.Transport.DirectOKLast = &t
+	case 2:
+		f := false
+		h.Transport.DirectOKLast = &f
+	}
+	switch transportStats.browserUsedLast.Load() {
+	case 1:
+		t := true
+		h.Transport.BrowserUsedLast = &t
+	case 2:
+		f := false
+		h.Transport.BrowserUsedLast = &f
+	}
+	h.Transport.BrowserAnswers = transportStats.browserRequests.Load()
+	h.Transport.DirectAnswers = transportStats.directOKRequests.Load()
 }

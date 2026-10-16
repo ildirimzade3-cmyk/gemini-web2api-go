@@ -67,6 +67,9 @@ type RuntimeConfig struct {
 	// the normal path (minutes). 0 disables the scheduled canary (the on-demand
 	// POST /admin/api/canary still works). See health.go.
 	CanaryIntervalMin int `json:"canary_interval_min"`
+	// BrowserFallbackURL: where generation goes when Google's protocol changed and the
+	// direct path no longer works (browser_fallback.go). Empty = no fallback.
+	BrowserFallbackURL string `json:"browser_fallback_url"`
 }
 
 const runtimeConfigKey = "runtime_config"
@@ -103,6 +106,7 @@ func initRuntimeConfig() {
 		AnonFirst:              cfg.AnonFirst,
 		TemporaryChat:          cfg.TemporaryChat,
 		CanaryIntervalMin:      cfg.CanaryIntervalMin,
+		BrowserFallbackURL:     cfg.BrowserFallbackURL,
 	}
 	if raw := kvGet(runtimeConfigKey); raw != "" {
 		saved := base
@@ -162,6 +166,9 @@ func validateRuntimeConfig(c RuntimeConfig) error {
 	if c.GeminiBL == "" {
 		return fmt.Errorf("gemini_bl 不能为空")
 	}
+	if err := validateBrowserFallbackURL(c.BrowserFallbackURL); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -178,8 +185,12 @@ func saveRuntimeConfig(next RuntimeConfig) error {
 		return err
 	}
 	rtMu.Lock()
+	changedBL := rtVal.GeminiBL != next.GeminiBL
 	rtVal = next
 	rtMu.Unlock()
+	if changedBL {
+		dropLearnedBL() // the operator pinned a bl on purpose: it beats an older repair
+	}
 	logf("[config] 运行时配置已更新")
 	return nil
 }

@@ -54,6 +54,10 @@ type Config struct {
 	TemporaryChat bool `json:"temporary_chat"`
 	// 调度器多久用一条固定小 prompt 走正常路径探一次（分钟），0 = 不探。默认 30。见 health.go。
 	CanaryIntervalMin int `json:"canary_interval_min"`
+	// Base URL of the repair container's browser transport (serve mode), for example
+	// http://gemini-web-browser.internal:9000. Empty = off. The bearer token is
+	// never stored: it comes from the env var BROWSER_FALLBACK_TOKEN. See browser_fallback.go.
+	BrowserFallbackURL string `json:"browser_fallback_url"`
 }
 
 var (

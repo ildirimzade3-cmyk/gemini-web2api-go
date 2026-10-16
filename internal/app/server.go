@@ -145,22 +145,30 @@ type generationJob struct {
 
 // runGeneration is the single entry from the API handlers to Google. JSON
 // requests are buffered and may run a repair round; everything else streams
-// through onDelta/onReasoning as before.
+// through onDelta/onReasoning as before. Every Google call goes through
+// generateWithFallback: the direct path first, the browser transport when
+// Google's protocol changed (browser_fallback.go).
 func runGeneration(ctx context.Context, j generationJob, onDelta, onReasoning func(string)) (string, []ToolCall, *StreamResult, error) {
 	if j.JSON != nil {
 		text, res, err := runJSONMode(ctx, j.JSON, j.Prompt, j.Latest,
 			func(ctx context.Context, prompt, latest string) (string, *StreamResult, error) {
-				t, _, res, err := callGemini(ctx, prompt, latest, j.Model, nil, j.Attachments, nil, nil)
+				t, _, res, err := generateWithFallback(ctx, j, prompt, true, nil, nil,
+					func(ctx context.Context, _, _ func(string)) (string, []ToolCall, *StreamResult, error) {
+						return callGemini(ctx, prompt, latest, j.Model, nil, j.Attachments, nil, nil)
+					})
 				return t, res, err
 			})
 		return text, nil, res, err
 	}
-	if rtCfg().MultiTurn && len(j.Attachments) == 0 && j.Model.Tool == 0 {
-		// Multi-turn: continue a known conversation by its history prefix and send
-		// only the new message. Tools work on this path too.
-		return callGeminiConv(ctx, j.Messages, j.Model, j.Tools, j.ToolChoice, onDelta, onReasoning)
-	}
-	return callGemini(ctx, j.Prompt, j.Latest, j.Model, j.Tools, j.Attachments, onDelta, onReasoning)
+	return generateWithFallback(ctx, j, j.Prompt, false, onDelta, onReasoning,
+		func(ctx context.Context, onDelta, onReasoning func(string)) (string, []ToolCall, *StreamResult, error) {
+			if rtCfg().MultiTurn && len(j.Attachments) == 0 && j.Model.Tool == 0 {
+				// Multi-turn: continue a known conversation by its history prefix and send
+				// only the new message. Tools work on this path too.
+				return callGeminiConv(ctx, j.Messages, j.Model, j.Tools, j.ToolChoice, onDelta, onReasoning)
+			}
+			return callGemini(ctx, j.Prompt, j.Latest, j.Model, j.Tools, j.Attachments, onDelta, onReasoning)
+		})
 }
 
 func callGemini(ctx context.Context, prompt, latest string, mc ModelConfig, tools []map[string]interface{},

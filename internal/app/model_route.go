@@ -39,14 +39,28 @@ type modelFamily struct {
 	ID      string
 	Aliases []string
 	Display string
+	// WebLabel is the name the Gemini web app's model picker shows. The browser
+	// transport picks the model by it, and the self-repair job's model catalogue
+	// is matched to a family by it (repair.go, browser_fallback.go).
+	WebLabel string
 }
 
 var modelFamilies = []modelFamily{
-	{ID: "gemini-3.6-flash", Display: "Gemini 3.6 Flash"},
-	{ID: "gemini-3.5-flash-lite", Display: "Gemini 3.5 Flash-Lite"},
-	{ID: "gemini-3.1-pro", Display: "Gemini 3.1 Pro"},
-	{ID: "gemini-3.8-flash", Aliases: []string{"gemini-3.7-flash"}, Display: "Gemini 3.8 Flash"},
-	{ID: "gemini-4-argon", Display: "Gemini 4 Argon"},
+	{ID: "gemini-3.6-flash", Display: "Gemini 3.6 Flash", WebLabel: "3.6 Flash"},
+	{ID: "gemini-3.5-flash-lite", Display: "Gemini 3.5 Flash-Lite", WebLabel: "3.5 Flash-Lite"},
+	{ID: "gemini-3.1-pro", Display: "Gemini 3.1 Pro", WebLabel: "3.1 Pro"},
+	{ID: "gemini-3.8-flash", Aliases: []string{"gemini-3.7-flash"}, Display: "Gemini 3.8 Flash", WebLabel: "3.8 Flash"},
+	{ID: "gemini-4-argon", Display: "Gemini 4 Argon", WebLabel: "4 Argon"},
+}
+
+// modelIDs lists every model id of the family: the plain id and the thinking
+// variant of the id and of each alias.
+func (f modelFamily) modelIDs() []string {
+	ids := []string{f.ID, f.ID + thinkingSuffix}
+	for _, a := range f.Aliases {
+		ids = append(ids, a, a+thinkingSuffix)
+	}
+	return ids
 }
 
 // familyOf finds the family of an id (plain, alias or "-thinking" variant of

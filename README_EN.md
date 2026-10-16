@@ -695,7 +695,8 @@ Google's thinking and writing time is not bounded by this proxy.
 
 ### Health, canary and events
 
-- `GET /healthz` (no auth, no secrets): `{status, version, accounts:{total,enabled,healthy}, bl:{value_age_seconds, source:"auto"|"config"}, xsrf_ok_last, last_canary:{ok, at, error_class, latency_ms}, problems}`.
+- `GET /healthz` (no auth, no secrets): `{status, version, accounts:{total,enabled,healthy}, bl:{value_age_seconds, source:"auto"|"config"|"repair"}, xsrf_ok_last, last_canary:{ok, at, error_class, latency_ms}, last_repair:{at, kind, ok}, browser_fallback:{configured, last_used_at}, transport:{direct_ok_last, browser_used_last, browser_answers, direct_answers}, problems}`.
+  The last three blocks belong to the self-repair feature below; `last_repair`, `last_used_at`, `direct_ok_last` and `browser_used_last` are `null` until there is something to report.
   Returns 200 when at least one healthy account exists (or the pool is empty, or `fallback_anon` is on) and the last canary did not
   fail; otherwise 503. "Healthy" means enabled with no consecutive failures. `value_age_seconds` and `xsrf_ok_last` are `null`
   until there is something to report.
@@ -704,8 +705,112 @@ Google's thinking and writing time is not bounded by this proxy.
   `POST /admin/api/canary` runs it on demand (409 if one is already running). A run that only hit the local IP-slot limiter is
   not recorded. The last result is stored in the `kv` table.
 - `GET /admin/api/events` (admin auth) lists the latest 200 rows of the `events(ts, kind, detail)` table, newest first.
-  Kinds: `canary_failed`, `canary_recovered`, `bl_changed`, `account_disabled` (by account id only), `protocol_parse_failure`.
+  Kinds: `canary_failed`, `canary_recovered`, `bl_changed`, `account_disabled` (by account id only), `protocol_parse_failure`,
+  and for self-repair `repair_context_served` (account id only), `repair_adopted`, `repair_unvalidated`, `browser_fallback_used`,
+  plus whatever the repair job posts itself (`repair_started`, `repair_failed`, ...).
   Events never contain prompts, answers or cookies. They follow `retention_days`.
+- `POST /admin/api/events` (admin auth) `{"kind", "detail"}` adds a row: `kind` must match `^[a-z_]{3,40}$`, `detail` is at most
+  500 characters, otherwise `400`. Response `{"ok":true,"event_id":n}`. The repair job uses it for its progress events.
+
+### Self-repair and the browser fallback
+
+Google changes its private web protocol now and then. The Miraz fork handles that in three steps:
+
+1. **Detect.** The canary (above) fails with `upstream_protocol_changed`; `/healthz.last_canary.ok` turns `false`, which is
+   what the host trigger of the repair container (`repair/`) watches.
+2. **Learn and validate.** The repair job opens `gemini.google.com` in a real headless browser, reads the page facts (build
+   label `bl`, the model picker catalogue) and reports them to the bridge. The bridge **stages** the values, runs a canary on the
+   **direct** path with them and keeps them only if it passes; otherwise it restores the previous values.
+3. **Browser transport.** Until that works (or when it cannot), generations are answered through the repair container's `serve`
+   mode, a browser session that really types the prompt into the web app.
+
+Everything the repair job does goes through the admin API (`Authorization: Bearer <admin token>`):
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /admin/api/repair/context` | Cookies of the healthiest enabled account plus the canary spec. |
+| `POST /admin/api/repair/learned` | The job reports page facts; the bridge validates and adopts or rolls back. |
+| `POST /admin/api/events` | The job's own progress events (above). |
+
+**`GET /admin/api/repair/context`** returns secrets, so it accepts only `Authorization: Bearer <admin token>`: no session cookie,
+no `?token=`, and `403` when no admin token is configured at all (never open). The response is `Cache-Control: no-store` and is never
+logged; the event `repair_context_served` records the account id only. Keep it on the internal network.
+
+```json
+{
+  "cookies": [{"name":"SID","value":"...","domain":".google.com","path":"/","secure":true,"httpOnly":true}],
+  "account_id": "acc-7",
+  "canary_prompt": "Reply with exactly one word: pong",
+  "canary_expect": "pong"
+}
+```
+
+The account is the enabled one with the fewest consecutive failures, then the most recent success (reading a context does not
+count as using it). With no enabled account `cookies` is `[]` and `account_id` is `null` (an anonymous repair).
+
+**`POST /admin/api/repair/learned`** body:
+
+```json
+{"kind":"page_facts","bl":"boq_gemini-web-uiserver_20261016.04_p0","signed_in":true,
+ "captured_at":"2026-10-17T10:00:00.000Z","account_id":"acc-7",
+ "models":[{"id":"fbb127bbb056c959","label":"3.6 Flash"}]}
+```
+
+Shapes are validated (`400 {"ok":false,"error"}` otherwise): `kind` is `page_facts`; `bl` (optional) matches the same pattern the
+auto-scraper accepts; `models` has at most 100 entries with an id of up to 64 safe characters and a printable label; `signed_in`
+is a boolean; `captured_at` is RFC 3339; at least one of `bl` / `models` must be present. Extra fields from the job are ignored.
+Then:
+
+- **bl**: staged as the effective build label. A learned `bl` beats both the pinned `gemini_bl` and the scraped one and survives a
+  restart (kv key `repair_learned`; the health report shows `bl.source: "repair"`). Saving a different `gemini_bl` in the panel drops it.
+- **Models**: a catalogue entry is adopted only if its label names exactly one model family (matched case- and spacing-insensitively
+  against the web labels in `modelFamilies`, `model_route.go`), its id is a 16-hex id, all entries of that family agree on one id and no
+  other family claims the same id. The id then replaces the hex of the whole family (plain model, thinking variant, aliases); the
+  catalogue value stays the reference for "needs a login". Anything that does not map unambiguously is recorded in the event but not adopted.
+- **Canary**: runs on the direct path with the staged values (up to 25 s, so the job's 30 s HTTP timeout still gets an answer).
+  Real traffic briefly sees the staged values while it runs.
+
+Response: `{"ok":true,"validated":true,"event_id":123}` when adopted (event `repair_adopted`), or
+`{"ok":true,"validated":false,"event_id":124,"error":"canary failed: upstream_protocol_changed"}` after a rollback (event
+`repair_unvalidated`; also when another canary is still running or the local IP slots were full). `409` while another report is
+being validated. The outcome is shown as `last_repair:{at, kind, ok}` in `/healthz`.
+
+**Browser fallback.** Runtime setting `browser_fallback_url` (panel: request behaviour; empty = off), for example
+`http://gemini-web-browser.internal:9000`, and the environment variable `BROWSER_FALLBACK_TOKEN` (the bearer token of the browser job;
+it is never stored in the database or shown in the panel). A generation goes to the browser when
+
+- the direct attempt failed with `upstream_protocol_changed` and nothing was streamed to the client yet, or
+- the last canary failed with that class: then the browser is asked first and the direct path stays the last resort,
+
+and the browser job's `GET /healthz` answers `{"ok":true}`. The canary itself always tests the direct path, so `/healthz` keeps
+telling the truth about it and the repair trigger keeps working.
+
+The bridge calls `POST {url}/generate` with `Authorization: Bearer $BROWSER_FALLBACK_TOKEN` and
+`{"prompt","model_label","attachments":[{"name","mime","data_b64"}],"json":bool}`; the job answers
+`{"text","model_label_seen"}`. There is no time limit apart from the usual 600 s dead-connection ceiling. Errors are classified like
+Google's: `429` / `upstream_rate_limited` (`Retry-After` kept), `503` with `no_valid_account` / `upstream_protocol_changed` /
+`upstream_unavailable`; any other answer is `upstream_unavailable`. If the direct attempt had failed with the protocol error, only a
+browser rate limit or a missing account replaces it as the client's error; other browser failures leave the original verdict.
+JSON mode (validation and the repair round), tool-call parsing and the request log work on the browser's text like on Google's.
+
+| Model id | Label sent as `model_label` |
+|---|---|
+| `gemini-3.6-flash` | `3.6 Flash` |
+| `gemini-3.5-flash-lite` | `3.5 Flash-Lite` |
+| `gemini-3.1-pro` | `3.1 Pro` |
+| `gemini-3.8-flash` (and alias `gemini-3.7-flash`) | `3.8 Flash` |
+| `gemini-4-argon` | `4 Argon` |
+
+The table is `WebLabel` in `modelFamilies`; the browser job picks the model whose picker label matches. A `-thinking` variant is
+sent with its family's label (the browser transport has no separate thinking switch). Not served by the browser transport: media
+models (`gemini-image`, `-music`, `-video`, `-canvas`), requests with more than 8 attachments, and streaming (the answer arrives
+whole and is sent to a streaming client in one piece).
+
+**Which transport answered** is recorded in the request log as `proxy_name = "browser"` (a direct answer shows its proxy, or nothing
+for a direct connection), so the admin per-proxy breakdown shows browser answers as their own row. `/healthz` adds
+`transport:{direct_ok_last, browser_used_last, browser_answers, direct_answers}` (counters since the process started) and
+`browser_fallback:{configured, last_used_at}`. A fallback answer is also written to the event log as `browser_fallback_used`
+(at most once a minute).
 
 ### Request size cap
 

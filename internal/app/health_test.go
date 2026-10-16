@@ -330,9 +330,9 @@ func TestEventsLogAndAPI(t *testing.T) {
 		t.Errorf("got %d events, first %+v", len(body.Events), body.Events[0])
 	}
 	rec = httptest.NewRecorder()
-	handleAdminEvents(rec, httptest.NewRequest("POST", "/admin/api/events", nil))
+	handleAdminEvents(rec, httptest.NewRequest("PUT", "/admin/api/events", nil))
 	if rec.Code != 405 {
-		t.Errorf("POST: %d", rec.Code)
+		t.Errorf("PUT: %d", rec.Code)
 	}
 
 	// Throttled kinds are written once per window.

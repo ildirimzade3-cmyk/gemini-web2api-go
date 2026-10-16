@@ -70,6 +70,14 @@ type ModelConfig struct {
 	// 用下载 host 认的 cookie 子集下回原始字节，见 media.go。跟登录态绑定：匿名请求
 	// 这个会被静默降级成一句「Are you signed in?」文本。
 	Tool int
+
+	// ID and catalogHex are set by resolveModel (decorateModel), never in the
+	// Models table. ID is the model id the request used (the browser transport
+	// maps it to a web label). catalogHex is the table value of HexID when a
+	// self-repair override replaced it, so modelNeedsLogin keeps judging by the
+	// catalogued model.
+	ID         string
+	catalogHex string
 }
 
 // 只暴露服务端清单（batchexecute?rpcids=otAQ7b）里真实存在的模型。
@@ -125,7 +133,11 @@ func hasCookie() bool {
 // 逐模型核对等价：那三个正名的 HexID 就是 hexPro31 / hexFlash38，其余登录模型都被
 // Thinking 或 Tool 覆盖。
 func modelNeedsLogin(mc ModelConfig) bool {
-	return mc.HexID == hexPro31 || mc.HexID == hexFlash38 || mc.HexID == hexArgon4 || mc.Thinking || mc.Tool > 0
+	hex := mc.catalogHex
+	if hex == "" {
+		hex = mc.HexID
+	}
+	return hex == hexPro31 || hex == hexFlash38 || hex == hexArgon4 || mc.Thinking || mc.Tool > 0
 }
 
 // anonFirstEligible 判断「匿名优先」开关下这次请求能不能走匿名（不占 cookie 账号）：
@@ -193,7 +205,7 @@ func resolveModel(modelName string) (string, ModelConfig, error) {
 		}
 		return "", ModelConfig{}, &unknownModelError{Name: modelName}
 	}
-	return modelName, mc, nil
+	return modelName, decorateModel(modelName, mc), nil
 }
 
 // unknownModelError is a model id the bridge does not serve. The OpenAI routes

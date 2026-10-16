@@ -76,6 +76,7 @@ func Run() {
 	// boot DB and load proxy pool
 	getDB()
 	initRuntimeConfig() // 面板改过的运行时配置盖在启动配置之上
+	loadLearned()       // bl and model ids a self-repair adopted earlier (repair.go)
 	loadProxies()
 	seedProxiesFromConfig() // --proxy / 遗留静态代理并进代理池
 	seedCookiesFromConfig() // --cookie-file / 遗留单 cookie 并进 cookie 池
@@ -152,6 +153,9 @@ func Run() {
 		mux.HandleFunc("/admin/api/test", requireAuth(handleAdminTest))
 		mux.HandleFunc("/admin/api/canary", requireAuth(handleAdminCanary))
 		mux.HandleFunc("/admin/api/events", requireAuth(handleAdminEvents))
+		// Self-repair job (repair.go). The context carries cookies: Bearer admin token only.
+		mux.HandleFunc("/admin/api/repair/context", requireAdminBearer(handleRepairContext))
+		mux.HandleFunc("/admin/api/repair/learned", requireAuth(handleRepairLearned))
 	}
 
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)

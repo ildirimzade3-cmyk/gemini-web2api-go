@@ -46,6 +46,11 @@ var blValueRe = regexp.MustCompile(`^boq_[a-z0-9-]+_\d{8}\.\d{2}_p\d+$`)
 // 用旧值最多是落后几个版本（实测落后两个多月仍可用），不值得为它给每个请求
 // 加一次页面抓取的延迟。auto 关掉时永远用配置里的值。
 func currentBL(proxyURL string) string {
+	// A bl a repair adopted (repair.go) was validated by a canary and beats both
+	// the pinned and the scraped value.
+	if bl, _ := learnedBL(); bl != "" {
+		return bl
+	}
 	pinned := rtCfg().GeminiBL
 	if !rtCfg().GeminiBLAuto {
 		return pinned
@@ -153,9 +158,14 @@ func forceRefreshBL(proxyURL string) bool {
 	return applyScrapedBL(got)
 }
 
-// blStatus describes where the bl in use comes from, for /healthz. ageSec is
-// nil when the value is the pinned config value (its age is unknown).
+// blStatus describes where the bl in use comes from, for /healthz: "repair" (a
+// learned value), "auto" (scraped) or "config" (pinned). ageSec is nil when the
+// value is the pinned config value (its age is unknown).
 func blStatus() (ageSec *int64, source string) {
+	if bl, at := learnedBL(); bl != "" {
+		a := int64(time.Since(time.Unix(at, 0)).Seconds())
+		return &a, "repair"
+	}
 	blMu.RLock()
 	defer blMu.RUnlock()
 	if rtCfg().GeminiBLAuto && blFetched != "" {
