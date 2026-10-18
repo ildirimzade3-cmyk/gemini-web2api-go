@@ -7,7 +7,7 @@
 
 import { collectAccountFacts, collectAlerts, collectModelMenu, readChatState } from './page.mjs';
 import { collectAnswerOutline, collectPageSummary, proposeAnswerSelectors, proposeSelectors, trimSummary } from './repair-ai.mjs';
-import { parseResetTime } from './policy.mjs';
+import { parseResetTime, tzOffsetMs } from './policy.mjs';
 
 // hl=en: every account's UI in English whatever its Google language, so one set of
 // labels and selectors fits all accounts.
@@ -535,7 +535,7 @@ export class GeminiPage {
     }
     await sleep(800 + Math.random() * 1200);
     await this.page.goto(APP_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => {});
-    return { meters: parseUsage(raw, Date.now()), raw: raw.slice(0, 4000) };
+    return { meters: parseUsage(raw, Date.now(), this.tz), raw: raw.slice(0, 4000) };
   }
 
   /** Text-free outline for diagnostics when a step breaks. */
@@ -574,33 +574,52 @@ export function parseModelItems(raw) {
 }
 
 
+
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+
+/** "Resets at 10:17 AM" / "Resets Oct 20 at 3:17 AM" / "Resets in 2 hr 10 min" -> epoch ms (page time zone `tz`). */
+export function parseResetPhrase(line, now = Date.now(), tz = 'UTC') {
+  const s = String(line ?? '');
+  const rel = /resets?\s+in\s+(?:(\d+)\s*(?:d|days?)\b)?\s*(?:(\d+)\s*(?:h|hr|hrs|hours?)\b)?\s*(?:(\d+)\s*(?:m|min|mins|minutes?)\b)?/i.exec(s);
+  if (rel && (rel[1] || rel[2] || rel[3])) return now + ((+rel[1] || 0) * 1440 + (+rel[2] || 0) * 60 + (+rel[3] || 0)) * 60_000;
+  const dated = /resets?\s+(?:on\s+)?([a-z]{3})[a-z]*\.?\s+(\d{1,2})(?:,\s*(\d{4}))?\s+at\s+(\d{1,2}):(\d{2})\s*([ap])\.?m\.?/i.exec(s);
+  if (dated) {
+    const mon = MONTHS.indexOf(dated[1].toLowerCase());
+    if (mon < 0) return null;
+    let hh = Number(dated[4]) % 12;
+    if (dated[6].toLowerCase() === 'p') hh += 12;
+    const offset = tzOffsetMs(tz, now);
+    const localYear = new Date(now + offset).getUTCFullYear();
+    let year = dated[3] ? Number(dated[3]) : localYear;
+    let t = Date.UTC(year, mon, Number(dated[2]), hh, Number(dated[5])) - offset;
+    if (!dated[3] && t < now - 86_400_000) t = Date.UTC(++year, mon, Number(dated[2]), hh, Number(dated[5])) - offset;
+    return t;
+  }
+  return parseResetTime(s, now, tz);
+}
+
 /**
- * Meters from the usage page text. Each meter is a line naming the window
- * ("5-hour", "weekly", ...) near a percentage and a reset phrase.
- * Returns [{ name, used_pct, resets_at }].
+ * Meters from the usage page text. The page has one block per window, each
+ * starting with its heading ("Current usage" = the rolling 5-hour allowance,
+ * "Weekly limit", ...) and holding "NN% used" and a "Resets ..." line in either
+ * order. Returns [{ name, used_pct, resets_at }].
  */
-export function parseUsage(text, now = Date.now()) {
+export function parseUsage(text, now = Date.now(), tz = 'UTC') {
   const lines = String(text ?? '').split(/\n+/).map(norm).filter(Boolean);
+  const HEAD = /^(current usage|5[- ]?hour (?:usage|limit)|weekly (?:usage|limit)|daily (?:usage|limit)|monthly (?:usage|limit))$/i;
   const meters = [];
   for (let i = 0; i < lines.length; i++) {
-    const pct = /(\d{1,3}(?:\.\d+)?)\s*%/.exec(lines[i]);
-    if (!pct) continue;
-    // The window's name sits on or above the percentage, its reset on or below it.
-    const near = lines.slice(Math.max(0, i - 2), i + 1).join(' ');
-    const below = lines.slice(i, i + 3).join(' ');
-    const name = /5[- ]?hour|five[- ]hour/i.test(near)
-      ? '5h'
-      : /week/i.test(near)
-        ? 'weekly'
-        : /\bday|daily/i.test(near)
-          ? 'daily'
-          : `meter${meters.length + 1}`;
-    if (meters.some((m) => m.name === name)) continue;
-    const r = /resets?\s+(?:in\s+)?(?:(\d+)\s*(?:d|days?)\b)?\s*(?:(\d+)\s*(?:h|hr|hrs|hours?)\b)?\s*(?:(\d+)\s*(?:m|min|mins|minutes?)\b)?/i.exec(below);
-    const resets_at =
-      r && (r[1] || r[2] || r[3]) ? now + ((+r[1] || 0) * 1440 + (+r[2] || 0) * 60 + (+r[3] || 0)) * 60_000 : parseResetTime(below, now);
-    const used = /\b(left|remaining)\b/i.test(lines[i]) ? 100 - Number(pct[1]) : Number(pct[1]);
-    meters.push({ name, used_pct: Math.max(0, Math.min(100, used)), resets_at });
+    if (!HEAD.test(lines[i])) continue;
+    const h = lines[i].toLowerCase();
+    const name = /current|5/.test(h) ? '5h' : /week/.test(h) ? 'weekly' : /daily/.test(h) ? 'daily' : 'monthly';
+    let used = null;
+    let resets = null;
+    for (let j = i + 1; j < lines.length && j < i + 6 && !HEAD.test(lines[j]); j++) {
+      const p = /^(\d{1,3}(?:\.\d+)?)\s*%\s*(used|left|remaining)?/i.exec(lines[j]);
+      if (p && used === null) used = /left|remaining/i.test(p[2] ?? '') ? 100 - Number(p[1]) : Number(p[1]);
+      if (/^resets?\b/i.test(lines[j]) && resets === null) resets = parseResetPhrase(lines[j], now, tz);
+    }
+    if (used !== null && !meters.some((m) => m.name === name)) meters.push({ name, used_pct: Math.max(0, Math.min(100, used)), resets_at: resets });
   }
   return meters;
 }

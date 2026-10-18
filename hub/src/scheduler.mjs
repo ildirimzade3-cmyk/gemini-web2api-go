@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { AccountRuntime } from './account.mjs';
 import { SelectorBook, UiError, ATTACH_THRESHOLD_BYTES, ATTACHED_PROMPT_INSTRUCTION } from './ui.mjs';
-import { budgetFor, hourlyCap, modelClass, modelId, restAfterMs, restState, UNKNOWN_RESET_MS, defaultSleep } from './policy.mjs';
+import { budgetFor, hourlyCap, meterState, modelClass, modelId, restAfterMs, restState, UNKNOWN_RESET_MS, defaultSleep } from './policy.mjs';
 import { judgeJson } from './prompt.mjs';
 
 const DAY = 86_400_000;
@@ -206,7 +206,10 @@ export class Scheduler {
     if (account.state !== 'ready') blockers.push(account.state);
     if (rest.resting) blockers.push('resting');
     if (lim?.exhausted_until > now) blockers.push('limit');
-    if (used >= budget) blockers.push('budget');
+    const meter = meterState(account, this.config.usageStop ?? {}, now);
+    blockers.push(...meter.blockers);
+    // Gemini meters compute, not prompts: with a fresh meter reading the count budget is only advisory.
+    if (used >= budget && !meter.fresh) blockers.push('budget');
     if (hourUsed >= hourlyCap(account)) blockers.push('hourly');
     if (rt?.signin) blockers.push('signin');
     const entry = account.models.find((m) => m.id === model.id);
@@ -221,8 +224,35 @@ export class Scheduler {
       exhausted_until: lim?.exhausted_until > now ? lim.exhausted_until : 0,
       observed_limit: lim?.observed_limit ?? null,
       resting_until: rest.until,
+      meter: { five_hour: meter.five, weekly: meter.weekly, read_at: meter.read_at, until: meter.until },
       blockers,
     };
+  }
+
+  /** What apps may see about the accounts: label, masked identity, plan, models, meters, availability. */
+  publicStatus(now = Date.now()) {
+    return this.store.accounts().map((a) => {
+      const meter = meterState(a, this.config.usageStop ?? {}, now);
+      const rest = restState(a, now);
+      const reasons = [...(a.state !== 'ready' ? [a.state] : []), ...meter.blockers, ...(rest.resting ? ['resting'] : [])];
+      return {
+        account: a.id,
+        label: a.label,
+        identity: a.identity,
+        plan: a.plan,
+        models: a.models.map((m) => m.id),
+        usage: {
+          five_hour_pct: meter.five?.used_pct ?? null,
+          five_hour_resets_at: meter.five?.resets_at ? new Date(meter.five.resets_at).toISOString() : null,
+          weekly_pct: meter.weekly?.used_pct ?? null,
+          weekly_resets_at: meter.weekly?.resets_at ? new Date(meter.weekly.resets_at).toISOString() : null,
+          read_at: meter.read_at ? new Date(meter.read_at).toISOString() : null,
+        },
+        available: reasons.length === 0,
+        unavailable_reasons: reasons,
+        available_again_at: meter.until ? new Date(meter.until).toISOString() : rest.until ? new Date(rest.until).toISOString() : null,
+      };
+    });
   }
 
   /** Per model: what the accounts can safely carry today and what was asked of them. */
@@ -326,14 +356,17 @@ export class Scheduler {
     if (!usable.length) {
       return { ok: false, status: 503, code: 'no_account', message: `no healthy account offers ${model.label} right now (signed out, paused or waiting for the operator)`, retryAfter: 600 };
     }
-    const soon = usable.filter(({ s }) => !s.blockers.some((b) => ['limit', 'budget'].includes(b)));
+    const soon = usable.filter(({ s }) => !s.blockers.some((b) => ['limit', 'budget', 'usage_5h', 'usage_weekly'].includes(b)));
     if (!soon.length) {
-      const until = Math.min(...usable.map(({ s, a }) => s.exhausted_until || this.#budgetFreesAt(a, model, now)));
+      const until = Math.min(...usable.map(({ s, a }) => s.meter.until || s.exhausted_until || this.#budgetFreesAt(a, model, now)));
+      const why = usable
+        .map(({ a, s }) => `${a.label}: ${s.blockers.filter((b) => b !== 'resting').join('+') || 'busy'}${s.meter.five_hour ? ` (5h ${s.meter.five_hour.used_pct}%, weekly ${s.meter.weekly?.used_pct ?? '?'}%)` : ''}`)
+        .join('; ');
       return {
         ok: false,
         status: 429,
         code: 'capacity',
-        message: `every account reached the safe daily amount for ${model.label}; next free slot ${new Date(until).toISOString()}`,
+        message: `every account is at its safe usage line for ${model.label} [${why}]; next free slot ${new Date(until).toISOString()}`,
         retryAfter: Math.max(60, Math.ceil((until - now) / 1000)),
       };
     }
@@ -505,6 +538,7 @@ export class Scheduler {
         prompts,
         ms: Date.now() - started,
         queue_ms: started - job.queuedAt,
+        usage: this.store.account(account.id)?.usage ?? {},
       });
     } catch (e) {
       if (e instanceof HubError) return job.reject(e);
@@ -517,6 +551,12 @@ export class Scheduler {
       rt.busy = false;
       rt.lastUsed = Date.now();
       rt.restUntil = Date.now() + (prompts ? restAfterMs(outChars) : 2000);
+      // During the rest a person might glance at the usage page: refresh the meter
+      // when it is older than 10 minutes (no cost to the caller, who already has the answer).
+      const acct = this.store.account(account.id);
+      if (prompts && acct?.state === 'ready' && Date.now() - (acct.usage?.read_at ?? 0) > 10 * 60_000) {
+        this.readUsage(account.id).catch((e) => this.log('usage_read_failed', { account: account.id, error: e.message }));
+      }
       this.#tick().catch(() => {});
     }
   }

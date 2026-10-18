@@ -125,7 +125,7 @@ export function parseResetTime(text, now = Date.now(), tz = 'UTC') {
   return null;
 }
 
-function tzOffsetMs(tz, now) {
+export function tzOffsetMs(tz, now) {
   try {
     const parts = new Intl.DateTimeFormat('en-US', {
       timeZone: tz,
@@ -147,3 +147,29 @@ function tzOffsetMs(tz, now) {
 
 /** When a limit message names no reset time, the model stays off on that account this long. */
 export const UNKNOWN_RESET_MS = 12 * HOUR;
+
+/**
+ * What Gemini's own usage meter says about an account (read from /usage). Above the
+ * stop line the account rests until that window resets. A meter older than
+ * METER_FRESH_MS is not trusted, and the prompt-count budget applies instead.
+ */
+export const METER_FRESH_MS = 2 * HOUR;
+export function meterState(account, { stop5h = 80, stopWeekly = 85 } = {}, now = Date.now()) {
+  const u = account.usage ?? {};
+  const fresh = Boolean(u.read_at) && now - u.read_at < METER_FRESH_MS;
+  const get = (name) => (u.meters ?? []).find((m) => m.name === name) ?? null;
+  const five = get('5h');
+  const weekly = get('weekly');
+  const blockers = [];
+  let until = 0;
+  // A full meter blocks until its reset even when the reading is old (it cannot empty sooner).
+  if (five && five.used_pct >= stop5h && (five.resets_at ?? 0) > now) {
+    blockers.push('usage_5h');
+    until = Math.max(until, five.resets_at);
+  }
+  if (weekly && weekly.used_pct >= stopWeekly && (weekly.resets_at ?? 0) > now) {
+    blockers.push('usage_weekly');
+    until = Math.max(until, weekly.resets_at);
+  }
+  return { fresh, five, weekly, read_at: u.read_at ?? 0, blockers, until };
+}

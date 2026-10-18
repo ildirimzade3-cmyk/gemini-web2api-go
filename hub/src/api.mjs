@@ -130,6 +130,7 @@ export class ApiServer {
 
     try {
       if (req.method === 'GET' && (url.pathname === '/v1/models' || url.pathname === '/v1beta/models')) return this.#models(res, app, flavor);
+      if (req.method === 'GET' && url.pathname === '/v1/hub/accounts') return send(res, 200, { accounts: this.scheduler.publicStatus() });
       if (req.method === 'POST' && url.pathname === '/v1/chat/completions') return await this.#openai(req, res, app);
       const m = /^\/v1beta\/models\/([^/:]+):(generateContent|streamGenerateContent)$/.exec(url.pathname);
       if (req.method === 'POST' && m) return await this.#gemini(req, res, app, decodeURIComponent(m[1]), m[2] === 'streamGenerateContent', url);
@@ -169,7 +170,11 @@ export class ApiServer {
   }
 
   #meta(result) {
+    const m = result.usage?.meters ?? [];
+    const pct = (n) => m.find((x) => x.name === n)?.used_pct;
     return {
+      // Gemini's own meter for the account that answered (as last read): "5h=28%; weekly=7%".
+      'x-hub-usage': `5h=${pct('5h') ?? '?'}%; weekly=${pct('weekly') ?? '?'}%`,
       'x-hub-model': result.model,
       'x-hub-model-label': result.label,
       'x-hub-account': result.account,

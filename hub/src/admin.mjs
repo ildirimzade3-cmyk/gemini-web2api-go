@@ -218,6 +218,7 @@ export class AdminServer {
         busy: Boolean(rt?.busy),
         signin: Boolean(rt?.signin),
         limits: this.store.limitsFor(a.id),
+        usage: a.usage,
       };
     });
     const apps = this.store.apps().map(({ key_hash, ...rest }) => rest);

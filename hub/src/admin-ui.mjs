@@ -41,7 +41,7 @@ let csrf='';const $=s=>document.querySelector(s);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const t=ms=>ms?new Date(ms).toLocaleString('tr-TR'):'—';
 const STATE={new:['yeni — giriş bekliyor','warn'],ready:['hazır','ok'],paused:['duraklatıldı','mute'],attention:['sizi bekliyor','bad']};
-const BLOCK={resting:'dinleniyor',limit:'Google limiti',budget:'günlük güvenli pay doldu',hourly:'saatlik sınır',signin:'giriş ekranı açık',new:'giriş yok',paused:'duraklatıldı',attention:'sizi bekliyor',no_model:'model yok',model_disabled:'model kapalı'};
+const BLOCK={usage_5h:'5 saatlik Gemini kotası dolu',usage_weekly:'haftalık Gemini kotası dolu',resting:'dinleniyor',limit:'Google limiti',budget:'günlük güvenli pay doldu',hourly:'saatlik sınır',signin:'giriş ekranı açık',new:'giriş yok',paused:'duraklatıldı',attention:'sizi bekliyor',no_model:'model yok',model_disabled:'model kapalı'};
 async function api(path,body){const r=await fetch(path,{method:body?'POST':'GET',headers:{'content-type':'application/json','x-csrf':csrf},body:body?JSON.stringify(body):undefined});
  const j=await r.json().catch(()=>({}));if(r.status===401){show(false);throw new Error('login')}if(!r.ok)throw new Error(j.error||r.status);return j}
 function show(on){$('#login').hidden=on;$('#app').hidden=!on;$('#logout').hidden=!on}
@@ -55,6 +55,9 @@ $('#testalert').onclick=async()=>{const j=await api('/api/test-alert',{});alert(
 async function act(id,a,extra){try{if(a==='remove'){if(!confirm(id+' hesabı ve tarayıcı profili silinsin mi?'))return;extra={confirm:id}}
  const j=await api('/api/accounts/'+id+'/'+a,extra||{});if(a==='signin'){sessionStorage.setItem('vnc:'+id,j.password);window.open(j.viewer,'_blank')}refresh()}catch(e){alert(e.message)}}
 async function appAct(id,a){if(a==='revoke'&&!confirm('Anahtar iptal edilsin mi?'))return;await api('/api/apps/'+id+'/'+a,{});refresh()}
+function usageLine(a){const ms=(a.usage&&a.usage.meters)||[];if(!ms.length)return '<div class=mute><small>Gemini kullanımı henüz okunmadı</small></div>';
+ const nm={'5h':'5 saatlik','weekly':'haftalık','daily':'günlük','monthly':'aylık'};
+ return '<div>Gemini kullanımı: '+ms.map(m=>'<b class="'+(m.used_pct>=80?'bad':m.used_pct>=60?'warn':'ok')+'">'+esc(nm[m.name]||m.name)+' %'+m.used_pct+'</b>'+(m.resets_at?' <small>(sıfırlanma '+t(m.resets_at)+')</small>':'')).join(' · ')+' <small class=mute>okundu '+t(a.usage.read_at)+'</small></div>'}
 function mins(m){const h=String(Math.floor(m/60)).padStart(2,'0'),mm=String(m%60).padStart(2,'0');return h+':'+mm}
 function render(s){csrf=s.csrf;
  const ready=s.accounts.filter(a=>a.state==='ready').length;$('#summary').textContent=s.accounts.length+' hesap, '+ready+' hazır · '+s.apps.filter(a=>!a.revoked_at).length+' uygulama';
@@ -63,10 +66,11 @@ function render(s){csrf=s.csrf;
   return '<div class="acct"><h3>'+esc(a.label)+' <span class="pill '+st[1]+'">'+st[0]+'</span></h3>'+
   '<div class="mute">'+esc(a.identity||'—')+' · plan: '+esc(a.plan)+(a.plan_label?' ('+esc(a.plan_label)+')':'')+' · '+(a.busy?'çalışıyor':a.warm?'tarayıcı açık':'tarayıcı kapalı')+'</div>'+
   (a.state_reason?'<div class="'+(a.state==='attention'?'bad':'mute')+'">'+esc(a.state_reason)+'</div>':'')+
+  usageLine(a)+
   '<div><small>Günlük dinlenme (UTC): '+mins(a.sleep_start_min)+' + '+Math.round(a.sleep_len_min/60)+' sa · son iş: '+t(a.last_job_at)+'</small></div>'+
   (caps?'<table style="margin-top:6px"><tr><th>model</th><th>24 sa kullanım / güvenli pay</th><th>durum</th></tr>'+caps+'</table>':'')+
   '<div class="row" style="margin-top:8px">'+(a.signin?'<button class="primary" onclick="act(\\''+a.id+'\\',\\'done\\')">Girişi bitirdim</button><button onclick="act(\\''+a.id+'\\',\\'signin\\')">Ekranı aç</button>':'<button class="primary" onclick="act(\\''+a.id+'\\',\\'signin\\')">Giriş yap</button>')+
-  '<button onclick="act(\\''+a.id+'\\',\\'refresh\\')">Yenile</button>'+(a.state==='paused'?'<button onclick="act(\\''+a.id+'\\',\\'resume\\')">Devam</button>':'<button onclick="act(\\''+a.id+'\\',\\'pause\\')">Duraklat</button>')+
+  '<button onclick="act(\\''+a.id+'\\',\\'refresh\\')">Yenile</button><button onclick="act(\\''+a.id+'\\',\\'usage\\')">Kullanımı oku</button>'+(a.state==='paused'?'<button onclick="act(\\''+a.id+'\\',\\'resume\\')">Devam</button>':'<button onclick="act(\\''+a.id+'\\',\\'pause\\')">Duraklat</button>')+
   '<button onclick="act(\\''+a.id+'\\',\\'remove\\')">Sil</button></div></div>'}).join('')||'<p class="mute">Henüz hesap yok.</p>';
  $('#capacity').innerHTML=s.capacity.length?'<table><tr><th>model</th><th>güvenli günlük kapasite</th><th>şu an kalan</th><th>24 sa istek</th><th>reddedilen</th><th></th></tr>'+s.capacity.map(c=>'<tr><td>'+esc(c.label)+' <small class=mono>'+esc(c.model)+'</small></td><td>'+c.safe_per_day+'</td><td>'+c.remaining_now+'</td><td>'+c.requests_24h+'</td><td>'+c.rejected_24h+'</td><td>'+(c.overloaded?'<span class=bad>yük güvenli kapasitenin üstünde — hesap ekleyin ya da yükü azaltın</span>':'<span class=ok>güvenli</span>')+'</td></tr>').join('')+'</table>':'<p class="mute">Giriş yapılmış hesap yok.</p>';
  $('#apps').innerHTML=s.apps.length?'<table><tr><th>ad</th><th>anahtar</th><th>kaynak adresler</th><th>modeller</th><th>günlük sınır</th><th></th></tr>'+s.apps.map(a=>'<tr class="'+(a.revoked_at?'mute':'')+'"><td>'+esc(a.name)+'</td><td class=mono>'+esc(a.key_hint)+'</td><td class=mono>'+esc(a.cidrs)+'</td><td class=mono>'+esc(a.models)+'</td><td>'+(a.daily_cap??'—')+'</td><td>'+(a.revoked_at?'iptal':'<button onclick="appAct(\\''+a.id+'\\',\\'revoke\\')">İptal et</button>')+'</td></tr>').join('')+'</table>':'<p class="mute">Henüz uygulama yok.</p>';
