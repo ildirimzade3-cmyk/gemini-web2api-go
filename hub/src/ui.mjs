@@ -198,29 +198,35 @@ export class GeminiPage {
     return { signed_in, identity: facts.identity, plan, plan_label: facts.plan_badge || facts.upgrade_hint || '' };
   }
 
-  /** Starts a new chat: the "New chat" button when a chat is open, otherwise a reload of /app. */
+  /**
+   * Starts a new chat. A page without turns is used as it is; otherwise the "New
+   * chat" button (what a person clicks), and a reload of /app only when that fails.
+   */
   async newChat() {
-    const onChat = /^\/app\/[0-9a-f]{6,}/i.test(new URL(this.page.url()).pathname);
-    const btn = onChat ? await this.#first('newChat') : null;
+    await this.open();
+    const turns = async () => (await this.#counts().catch(() => ({ answer: 1 }))).answer;
+    if ((await turns()) === 0 && !/^\/app\/[0-9a-f]{6,}/i.test(new URL(this.page.url()).pathname)) return;
+    const btn = await this.#first('newChat', { timeout: 1500 });
     if (btn) {
       await btn.el.click({ timeout: 5000 }).catch(() => {});
-      await human(400, 900);
+      for (let i = 0; i < 16; i++) {
+        await sleep(200);
+        if ((await turns()) === 0 && (await this.#first('input'))) return;
+      }
     }
-    if (onChat && /^\/app\/[0-9a-f]{6,}/i.test(new URL(this.page.url()).pathname)) {
-      await this.page.goto(APP_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 });
-    }
+    await this.page.goto(APP_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 });
     await this.open();
-    const count = await this.page.locator(this.book.list('answer').join(', ')).count().catch(() => 0);
-    if (count > 0) {
-      await this.page.goto(APP_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 });
-      await this.open();
-    }
   }
 
   /** Switches the fresh chat to a temporary chat when the account offers it. Returns true when on. */
   async temporaryChat() {
+    // An account without the switch is not searched again for an hour (saves 1.5 s per prompt).
+    if (this.noTempUntil > Date.now()) return false;
     const found = await this.#first('tempChat', { timeout: 1500 });
-    if (!found) return false;
+    if (!found) {
+      this.noTempUntil = Date.now() + 3_600_000;
+      return false;
+    }
     const pressed = async () => {
       const a = await found.el.getAttribute('aria-pressed').catch(() => null);
       if (a !== null) return a === 'true';
