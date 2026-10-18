@@ -46,7 +46,12 @@ export function collectModelMenu() {
     id: el.getAttribute('data-mode-id') || '',
     text: (el.innerText || el.textContent || '').trim(),
     enabled: el.getAttribute('aria-disabled') !== 'true',
-    selected: el.getAttribute('data-active') === 'true' || el.classList.contains('selected'),
+    selected:
+      el.getAttribute('data-active') === 'true' ||
+      el.getAttribute('aria-checked') === 'true' ||
+      el.getAttribute('aria-selected') === 'true' ||
+      el.classList.contains('selected') ||
+      el.classList.contains('is-selected'),
   }));
 }
 

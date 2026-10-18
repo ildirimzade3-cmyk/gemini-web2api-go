@@ -37,6 +37,10 @@ class FakePage {
     if (this.hooks.currentModel) return this.hooks.currentModel(this);
     return this.shown;
   }
+  async verifyModel(label) {
+    const shown = await this.currentModel();
+    return { ok: shown === label || label.endsWith(shown), shown };
+  }
   async attach(files) {
     this.attached.push(files);
   }

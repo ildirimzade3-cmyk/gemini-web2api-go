@@ -265,8 +265,6 @@ export class GeminiPage {
 
   /** Picks the model with exactly this label and confirms the picker shows it. */
   async selectModel(label) {
-    const shownBefore = await this.currentModel();
-    if (labelsMatch(shownBefore, label)) return;
     const items = parseModelItems(await this.#openPicker());
     const target = items.find((m) => norm(m.label).toLowerCase() === norm(label).toLowerCase());
     if (!target) {
@@ -284,9 +282,28 @@ export class GeminiPage {
     await this.page.locator(this.book.list('pickerItem').join(', ')).nth(target.index).click({ timeout: 5000 });
     for (let i = 0; i < 16; i++) {
       await sleep(250);
-      if (labelsMatch(await this.currentModel(), label)) return;
+      if (labelsMatch(await this.currentModel(), label)) {
+        this.catalogueLabels = items.map((m) => m.label);
+        return;
+      }
     }
     throw new UiError('ui_changed', `the picker did not switch to "${label}"`, { role: 'picker' });
+  }
+
+  /**
+   * True when the chat is set to exactly `label`. The picker button often shows a
+   * short name ("Flash"); when that short name fits more than one catalogue entry,
+   * the open menu's checked item decides.
+   */
+  async verifyModel(label) {
+    const shown = await this.currentModel();
+    if (!labelsMatch(shown, label)) return { ok: false, shown };
+    const fits = (this.catalogueLabels ?? [label]).filter((l) => labelsMatch(shown, l));
+    if (fits.length <= 1) return { ok: true, shown };
+    const items = parseModelItems(await this.#openPicker());
+    await this.page.keyboard.press('Escape').catch(() => {});
+    const sel = items.find((m) => m.selected);
+    return { ok: Boolean(sel) && norm(sel.label).toLowerCase() === norm(label).toLowerCase(), shown: sel?.label ?? shown };
   }
 
   async attach(files) {

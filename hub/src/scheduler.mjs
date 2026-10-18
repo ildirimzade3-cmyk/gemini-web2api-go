@@ -38,6 +38,7 @@ export class Scheduler {
     this.runtimes = new Map();
     this.queue = [];
     this.inflight = new Map(); // dedupe key -> { promise, done, result, at }
+    this.served = new Map(); // app id -> start times of its recent jobs (fair share)
     this.timer = null;
     this.stopped = false;
   }
@@ -304,11 +305,14 @@ export class Scheduler {
   async #tick() {
     if (this.stopped || !this.queue.length) return;
     const now = Date.now();
-    // Round robin across apps so one app cannot starve the others.
-    const order = [];
+    // Fair share across apps: the app that started the fewest jobs in the last
+    // 10 minutes goes first, then round robin, so one app cannot starve the others.
+    const recent = (appId) => (this.served.get(appId) ?? []).filter((t) => now - t < 600_000).length;
     const byApp = new Map();
     for (const j of this.queue) (byApp.get(j.app.id) ?? byApp.set(j.app.id, []).get(j.app.id)).push(j);
-    for (let i = 0; order.length < this.queue.length; i++) for (const list of byApp.values()) if (list[i]) order.push(list[i]);
+    const lists = [...byApp.entries()].sort((x, y) => recent(x[0]) - recent(y[0])).map(([, l]) => l);
+    const order = [];
+    for (let i = 0; order.length < this.queue.length; i++) for (const list of lists) if (list[i]) order.push(list[i]);
     for (const job of order) {
       const account = this.#pick(job, now);
       if (!account) {
@@ -320,6 +324,7 @@ export class Scheduler {
         continue;
       }
       this.#dequeue(job);
+      this.served.set(job.app.id, [...(this.served.get(job.app.id) ?? []).filter((t) => now - t < 600_000), now]);
       this.#run(job, account).catch((e) => this.log('run_error', { error: e.message }));
     }
   }
@@ -392,8 +397,8 @@ export class Scheduler {
       if (files.length) await g.attach(files);
       await g.insert(text);
       // Last look before the irreversible step: the picker must still show the model.
-      const shown = await g.currentModel();
-      if (!labelOk(shown, job.model.label)) throw new UiError('model_changed', `picker shows "${shown}" instead of "${job.model.label}"`);
+      const before = await g.verifyModel(job.model.label);
+      if (!before.ok) throw new UiError('model_changed', `picker shows "${before.shown}" instead of "${job.model.label}"`);
       try {
         prompts = 1;
         sent = true;
@@ -406,8 +411,8 @@ export class Scheduler {
         throw e;
       }
       let answer = await g.waitAnswer((t) => job.onProgress?.(t));
-      const after = await g.currentModel();
-      if (!labelOk(after, job.model.label)) throw new UiError('model_changed', `the answer came with "${after}" instead of "${job.model.label}"`, { sent: true });
+      const after = await g.verifyModel(job.model.label);
+      if (!after.ok) throw new UiError('model_changed', `the answer came with "${after.shown}" instead of "${job.model.label}"`, { sent: true });
       let json = null;
       if (job.json) {
         json = judgeJson(answer.text, job.json.schema);
@@ -565,10 +570,4 @@ export class Scheduler {
       this.store.pruneUsage(now - 30 * DAY);
     }
   }
-}
-
-function labelOk(shown, label) {
-  const a = String(shown ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
-  const b = String(label ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
-  return Boolean(a) && (a === b || b.endsWith(a) || a.endsWith(b));
 }
