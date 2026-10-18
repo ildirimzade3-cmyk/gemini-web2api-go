@@ -1,0 +1,38 @@
+# Gemini hub on the VPS: /opt/gemini-hub/docker-compose.yml (see deploy/README.md).
+#
+# Host networking so that the hub sees real source addresses (app keys are bound to
+# them) and ufw governs its ports. It listens only where HUB_API_LISTEN says
+# (loopback, the tailnet address, the docker0 gateway); the admin side is loopback only.
+name: gemini-hub
+
+services:
+  hub:
+    image: gemini-hub:${HUB_COMMIT:?set HUB_COMMIT}
+    container_name: gemini-hub
+    restart: unless-stopped
+    network_mode: host
+    # HUB_API_LISTEN, HUB_ADMIN_LISTEN, HUB_NTFY_TOPIC, HUB_REPAIR_API_KEY: /etc/gemini-hub/hub.env (0600, never printed)
+    env_file: /etc/gemini-hub/hub.env
+    environment:
+      # The VPS address geolocates to Manassas, Virginia: the browsers keep that time zone.
+      TZ: America/New_York
+    volumes:
+      - /var/lib/gemini-hub:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+      - /home/hub:size=256m,uid=10101,gid=10101,mode=0700
+    shm_size: 1g
+    mem_limit: 3g
+    memswap_limit: 3g
+    cpus: 2.0
+    pids_limit: 1024
+    security_opt:
+      - no-new-privileges:true
+      # Docker's default profile + clone/unshare/setns/chroot so Chrome keeps its own sandbox.
+      - seccomp=/opt/gemini-hub/seccomp-chrome.json
+    cap_drop: [ALL]
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }

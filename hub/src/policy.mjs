@@ -65,9 +65,13 @@ export function restAfterMs(outChars, rnd = Math.random) {
   return Math.round(Math.min(40_000, base + reading));
 }
 
-/** Default daily rest for the n-th account (0-based): 6 h, staggered by 2.5 h, from 21:00 UTC. */
+/**
+ * Default daily rest for the n-th account (0-based): 5 h from 20:00 UTC (the
+ * operator's night in Baku, evening on the US east coast where the VPS is),
+ * each further account 3 h later so the hub as a whole never sleeps.
+ */
 export function defaultSleep(index) {
-  return { sleep_start_min: (21 * 60 + index * 150) % 1440, sleep_len_min: 6 * 60 };
+  return { sleep_start_min: (20 * 60 + index * 180) % 1440, sleep_len_min: 5 * 60 };
 }
 
 function dayJitterMin(accountId, dayIndex) {

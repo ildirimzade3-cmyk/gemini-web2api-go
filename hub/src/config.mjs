@@ -34,7 +34,7 @@ export function loadConfig(env = process.env) {
     ntfyServer: env.HUB_NTFY_SERVER || 'https://ntfy.sh',
     ntfyTopic: env.HUB_NTFY_TOPIC || '',
     // Official Gemini API key used only to propose new selectors when the site changes.
-    repairApiKey: env.HUB_REPAIR_API_KEY || '',
+    repairApiKey: env.HUB_REPAIR_API_KEY || env.GEMINI_REPAIR_API_KEY || '',
     repairModel: env.HUB_REPAIR_MODEL || 'gemini-3.6-flash',
     displayBase: int(env.HUB_DISPLAY_BASE, 100),
     vncPortBase: int(env.HUB_VNC_PORT_BASE, 15900),
