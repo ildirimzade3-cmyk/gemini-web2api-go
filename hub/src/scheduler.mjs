@@ -383,11 +383,22 @@ export class Scheduler {
         out_chars: outChars,
         code,
       });
+    const steps = {};
+    let mark = Date.now();
+    const step = (name) => {
+      const t = Date.now();
+      steps[name] = t - mark;
+      mark = t;
+    };
     try {
       const g = await rt.open();
+      step('open');
       await g.newChat();
+      step('new_chat');
       const temporary = await g.temporaryChat();
+      step('temporary');
       await g.selectModel(job.model.label);
+      step('model');
       let text = job.prompt.text;
       const files = [...job.prompt.files];
       if (Buffer.byteLength(text) > ATTACH_THRESHOLD_BYTES) {
@@ -395,7 +406,9 @@ export class Scheduler {
         text = ATTACHED_PROMPT_INSTRUCTION;
       }
       if (files.length) await g.attach(files);
+      step('attach');
       await g.insert(text);
+      step('insert');
       // Last look before the irreversible step: the picker must still show the model.
       const before = await g.verifyModel(job.model.label);
       if (!before.ok) throw new UiError('model_changed', `picker shows "${before.shown}" instead of "${job.model.label}"`);
@@ -403,6 +416,7 @@ export class Scheduler {
         prompts = 1;
         sent = true;
         await g.send();
+        step('send');
       } catch (e) {
         if (e instanceof UiError && !e.sent && e.code === 'ui_changed' && e.role === 'send') {
           sent = false;
@@ -411,6 +425,7 @@ export class Scheduler {
         throw e;
       }
       let answer = await g.waitAnswer((t) => job.onProgress?.(t));
+      step('answer');
       const after = await g.verifyModel(job.model.label);
       if (!after.ok) throw new UiError('model_changed', `the answer came with "${after.shown}" instead of "${job.model.label}"`, { sent: true });
       let json = null;
@@ -424,7 +439,9 @@ export class Scheduler {
           json = judgeJson(answer.text, job.json.schema);
         }
       }
+      step('verify_json');
       outChars = answer.text.length;
+      this.log('job_done', { account: account.id, model: job.model.id, temporary, via: answer.via, prompts, steps });
       if (json && !json.valid) {
         usage('error', 'json_invalid');
         throw new HubError(502, 'json_invalid', `the model did not return valid JSON (${json.errors.slice(0, 3).join('; ')})`, { sent: true, text: answer.text });

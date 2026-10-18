@@ -107,6 +107,8 @@ export class AdminServer {
     if (req.method !== 'GET' && !timingSafeEqualStr(String(req.headers['x-csrf'] ?? ''), s.csrf)) return this.#json(res, 403, { error: 'bad csrf' });
     if (req.method === 'GET' && p.startsWith('/viewer/')) return this.#html(res, VIEWER_HTML);
     if (req.method === 'GET' && p === '/api/state') return this.#json(res, 200, this.#state(s));
+    const shot = /^\/api\/accounts\/(a\d+)\/screenshot$/.exec(p);
+    if (req.method === 'GET' && shot) return this.#screenshot(res, shot[1]);
     if (req.method === 'POST' && p === '/logout') {
       this.sessions.delete(s.key);
       return this.#json(res, 200, { ok: true }, { 'set-cookie': 'hub_admin=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict' });
@@ -164,6 +166,15 @@ export class AdminServer {
     }
     res.writeHead(200, { 'content-type': MIME[path.extname(file)] ?? 'application/octet-stream', 'cache-control': 'max-age=3600' });
     fs.createReadStream(file).pipe(res);
+  }
+
+  /** What the account's work browser shows right now (admin only, never stored). */
+  async #screenshot(res, id) {
+    const page = this.scheduler.runtimes.get(id)?.gpage?.page;
+    if (!page) return this.#json(res, 409, { error: 'the work browser of this account is closed' });
+    const png = await page.screenshot({ type: 'png' });
+    res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'no-store' });
+    res.end(png);
   }
 
   #state(s) {
