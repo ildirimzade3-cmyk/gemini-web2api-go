@@ -117,6 +117,10 @@ export class AdminServer {
     const body = req.method === 'POST' ? await this.#body(req) : {};
     let m;
     if (req.method === 'POST' && p === '/api/accounts') return this.#json(res, 200, this.scheduler.addAccount(String(body.label ?? '').slice(0, 40)));
+    if ((m = /^\/api\/accounts\/(a\d+)\/signin-status$/.exec(p)) && req.method === 'GET') {
+      const rt = this.scheduler.runtimes.get(m[1]);
+      return this.#json(res, 200, { open: Boolean(rt?.signin), signed_in: Boolean(rt?.signin && rt.signInSeen()) });
+    }
     if ((m = /^\/api\/accounts\/(a\d+)\/(signin|done|refresh|pause|resume|remove|sleep)$/.exec(p)) && req.method === 'POST') {
       return this.#json(res, 200, await this.#accountAction(m[1], m[2], body));
     }

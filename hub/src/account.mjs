@@ -12,6 +12,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
 import { chromium } from 'patchright-core';
 import { GeminiPage, APP_URL } from './ui.mjs';
 
@@ -196,6 +197,29 @@ export class AccountRuntime {
     this.log('signin_started');
     await sleep(1200);
     return { port: this.vncPort, password };
+  }
+
+  /**
+   * Whether the sign-in Chrome holds a Google session yet: looks only at cookie
+   * NAMES in a copy of the profile's cookie store (values stay encrypted and unread).
+   */
+  signInSeen() {
+    const src = path.join(this.profile, 'Default', 'Cookies');
+    if (!fs.existsSync(src)) return false;
+    const copy = path.join('/tmp', `cookies-${this.id}.db`);
+    try {
+      fs.copyFileSync(src, copy);
+      const db = new DatabaseSync(copy, { readOnly: true });
+      const row = db
+        .prepare("SELECT COUNT(*) AS n FROM cookies WHERE host_key LIKE '%google.com' AND name IN ('SID', '__Secure-1PSID', '__Secure-3PSID')")
+        .get();
+      db.close();
+      return Number(row.n) > 0;
+    } catch {
+      return false;
+    } finally {
+      fs.rmSync(copy, { force: true });
+    }
   }
 
   /** Closes the sign-in Chrome gracefully (so the session is written to disk) and the VNC server. */
