@@ -37,8 +37,9 @@ export function loadConfig(env = process.env) {
     // Gemini usage meter stop lines (percent used): the account rests until the window resets.
     usageStop: { stop5h: int(env.HUB_USAGE_STOP_5H, 95), stopWeekly: int(env.HUB_USAGE_STOP_WEEKLY, 95) },
     maxWarmBrowsers: int(env.HUB_MAX_WARM, 3),
-    // An idle browser stays open this long: reopening it means fresh page loads at Google.
-    idleCloseMs: int(env.HUB_IDLE_CLOSE_MIN, 120) * 60_000,
+    // A browser with no work for this long is closed to free memory. Short enough for RAM,
+    // long enough that a burst of requests reuses one open browser instead of reloading Gemini.
+    idleCloseMs: int(env.HUB_IDLE_CLOSE_MIN, 3) * 60_000,
     dedupeWindowMs: int(env.HUB_DEDUPE_MIN, 10) * 60_000,
     ntfyServer: env.HUB_NTFY_SERVER || 'https://ntfy.sh',
     ntfyTopic: env.HUB_NTFY_TOPIC || '',

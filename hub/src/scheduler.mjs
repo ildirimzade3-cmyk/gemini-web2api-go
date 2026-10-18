@@ -48,7 +48,7 @@ export class Scheduler {
   start() {
     this.store.accounts().forEach((a, i) => this.#runtime(a, i));
     this.timer = setInterval(() => this.#tick().catch((e) => this.log('tick_error', { error: e.message })), 1000);
-    this.housekeeping = setInterval(() => this.#housekeeping().catch((e) => this.log('housekeeping_error', { error: e.message })), 30_000);
+    this.housekeeping = setInterval(() => this.#housekeeping().catch((e) => this.log('housekeeping_error', { error: e.message })), 20_000);
   }
 
   async stop() {
