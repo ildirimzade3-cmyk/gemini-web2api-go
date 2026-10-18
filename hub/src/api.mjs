@@ -27,7 +27,31 @@ function readBody(req) {
   });
 }
 
+/**
+ * Many HTTP clients give up when no response header arrives within 300 s (Node's
+ * fetch, some proxies). A request still waiting after `holdMs` (240 s) gets its headers
+ * now and a heartbeat until the answer: blank lines are valid leading JSON
+ * whitespace, ": waiting" lines are SSE comments. Errors after that point arrive
+ * in the body (status already 200), with x-hub-held: 1 telling the client why.
+ */
+function holdOpen(res, sse, holdMs) {
+  let beat = null;
+  const timer = setTimeout(() => {
+    if (res.headersSent || res.writableEnded) return;
+    res.hubHeld = sse ? 'sse' : 'json';
+    res.writeHead(200, { 'content-type': sse ? 'text/event-stream' : 'application/json', 'cache-control': 'no-store', 'x-hub-held': '1' });
+    const tick = () => !res.writableEnded && res.write(sse ? ': waiting\n\n' : '\n');
+    tick();
+    beat = setInterval(tick, 15_000);
+  }, holdMs);
+  return () => {
+    clearTimeout(timer);
+    clearInterval(beat);
+  };
+}
+
 function send(res, status, obj, headers = {}) {
+  if (res.hubHeld === 'json' && !res.writableEnded) return res.end(JSON.stringify(obj));
   if (res.headersSent) return;
   const body = JSON.stringify(obj);
   res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', ...headers });
@@ -110,6 +134,7 @@ export class ApiServer {
       if (e instanceof RequestError) return fail(400, e.code, e.message);
       if (e instanceof HubError) {
         const headers = e.retryAfter ? { 'retry-after': String(e.retryAfter) } : {};
+        if (res.hubHeld === 'json') return send(res, e.status, errorBody(flavor, e.status, e.code, e.message));
         if (res.headersSent) return this.#streamError(res, flavor, e);
         return fail(e.status, e.code, e.message, headers);
       }
@@ -178,6 +203,7 @@ export class ApiServer {
           }
         }
       : null;
+    const release = holdOpen(res, stream, this.config.holdMs ?? 240_000);
     const result = await this.scheduler.submit({
       app,
       model: body.model,
@@ -186,7 +212,7 @@ export class ApiServer {
       onProgress,
       dedupeKey: this.#dedupeKey(app, req, body.model, raw),
       inChars: prompt.text.length,
-    });
+    }).finally(release);
     const usage = { prompt_tokens: estTokens(prompt.text.length), completion_tokens: estTokens(result.text.length) };
     usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
     if (stream) {
@@ -242,7 +268,10 @@ export class ApiServer {
           }
         }
       : null;
-    const result = await this.scheduler.submit({ app, model, prompt, json, onProgress, dedupeKey: this.#dedupeKey(app, req, model, raw), inChars: prompt.text.length });
+    const release = holdOpen(res, sse, this.config.holdMs ?? 240_000);
+    const result = await this.scheduler
+      .submit({ app, model, prompt, json, onProgress, dedupeKey: this.#dedupeKey(app, req, model, raw), inChars: prompt.text.length })
+      .finally(release);
     const usageMetadata = { promptTokenCount: estTokens(prompt.text.length), candidatesTokenCount: estTokens(result.text.length) };
     usageMetadata.totalTokenCount = usageMetadata.promptTokenCount + usageMetadata.candidatesTokenCount;
     if (sse) {

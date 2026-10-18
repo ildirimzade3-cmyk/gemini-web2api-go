@@ -23,7 +23,7 @@ function freePort() {
 }
 
 /** Starts a real ApiServer on a free loopback port with a fake scheduler. */
-async function startApi(t, submit = async () => ({ text: 'hi', model: 'gemini-3.1-pro', label: '3.1 Pro', account: 'a1' })) {
+async function startApi(t, submit = async () => ({ text: 'hi', model: 'gemini-3.1-pro', label: '3.1 Pro', account: 'a1' }), extraConfig = {}) {
   const store = new Store(':memory:');
   const key = randomToken('hub_');
   const otherKey = randomToken('hub_');
@@ -46,7 +46,7 @@ async function startApi(t, submit = async () => ({ text: 'hi', model: 'gemini-3.
   let listening;
   const ready = new Promise((r) => (listening = r));
   const api = new ApiServer({
-    config: { apiListen: [`127.0.0.1:${port}`], allowCidrs: ['127.0.0.0/8'] },
+    config: { apiListen: [`127.0.0.1:${port}`], allowCidrs: ['127.0.0.0/8'], ...extraConfig },
     store,
     scheduler,
     log: (kind) => kind === 'api_listening' && listening(),
@@ -360,4 +360,24 @@ test('unknown endpoint -> 404', async (t) => {
   const res = await a.call('/v1/nothing');
   assert.equal(res.status, 404);
   assert.equal((await res.json()).error.code, 'not_found');
+});
+
+test('a long wait gets early headers and a JSON-whitespace heartbeat, then the normal body', async (t) => {
+  const slow = () => new Promise((r) => setTimeout(() => r({ text: 'late', model: 'gemini-3.1-pro', label: '3.1 Pro', account: 'a1' }), 300));
+  const a = await startApi(t, slow, { holdMs: 50 });
+  const res = await a.call('/v1/chat/completions', { method: 'POST', body: chatBody() });
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('x-hub-held'), '1');
+  const text = await res.text();
+  assert.match(text, /^\n/);
+  assert.equal(JSON.parse(text).choices[0].message.content, 'late');
+});
+
+test('an error after the early headers arrives as an error body', async (t) => {
+  const failing = () => new Promise((_, rej) => setTimeout(() => rej(new HubError(429, 'account_limit', 'limit')), 300));
+  const a = await startApi(t, failing, { holdMs: 50 });
+  const res = await a.call('/v1/chat/completions', { method: 'POST', body: chatBody() });
+  assert.equal(res.headers.get('x-hub-held'), '1');
+  const body = JSON.parse(await res.text());
+  assert.equal(body.error.code, 'account_limit');
 });
