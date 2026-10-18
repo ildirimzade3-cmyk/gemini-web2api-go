@@ -80,6 +80,17 @@ Anahtar ve link yalnız o an gösterilir; ikisini birlikte kaydet.
 | `gemini-3.5-flash-lite` | Pro hesap(lar) | en hızlı |
 | `gemini-auto` | ücretsiz hesap(lar) | modeli Google seçer |
 
+### Efor (düşünme seviyesi)
+
+Ücretli hesaplarda her model için Gemini'nin **Thinking level** ayarı kullanılır: `low` (hızlı,
+kotayı az harcar), `medium`, `high` (en kapsamlı). Belirtmezsen **low** seçilir. Üç yoldan biriyle iste:
+
+- OpenAI biçimi: `"reasoning_effort": "high"`
+- Gemini biçimi: `"generationConfig": {"thinkingConfig": {"thinkingLevel": "HIGH"}}` (ya da `thinkingBudget`)
+- Parametre gönderemeyen araçlarda model adının sonuna ekle: `gemini-3.8-flash-high`, `gemini-3.1-pro-medium`
+
+Uygulanan seviye `x-hub-thinking` başlığında yazar. Ücretsiz hesabın Auto modelinde bu ayar yoktur (`n/a`).
+
 Hub istenen modeli kullanır ya da hata verir; başka modelle sessizce cevap vermez. Cevabın hangi
 model ve hesaptan geldiği `x-hub-model-label` ve `x-hub-account` başlıklarında yazar.
 

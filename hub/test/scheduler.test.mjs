@@ -37,6 +37,10 @@ class FakePage {
     if (this.hooks.currentModel) return this.hooks.currentModel(this);
     return this.shown;
   }
+  async setThinking(level) {
+    this.thinking = level;
+    return this.hooks.noThinking ? 'n/a' : level;
+  }
   async readUsage() {
     this.usageReads = (this.usageReads ?? 0) + 1;
     return { meters: this.hooks.meters ?? [{ name: '5h', used_pct: 10, resets_at: Date.now() + 3_600_000 }], raw: '' };
@@ -520,4 +524,18 @@ test('a full queue refuses at once with an estimated wait', async (t) => {
   release();
   await first;
   await second;
+});
+
+test('thinking level: from the request, from a model-name suffix, and the default otherwise', async (t) => {
+  const h = harness(t, { accounts: 1 });
+  let r = await h.scheduler.submit(h.req({ thinking: 'high', dedupeKey: 't1' }));
+  assert.equal(r.thinking, 'high');
+  assert.equal(h.pages.a1.thinking, 'high');
+  await settle();
+  r = await h.scheduler.submit(h.req({ model: `${MODEL_ID}-medium`, dedupeKey: 't2' }));
+  assert.equal(r.model, MODEL_ID);
+  assert.equal(r.thinking, 'medium');
+  await settle();
+  r = await h.scheduler.submit(h.req({ dedupeKey: 't3' }));
+  assert.equal(r.thinking, 'low');
 });

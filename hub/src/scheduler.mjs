@@ -306,6 +306,9 @@ export class Scheduler {
   #admit(req) {
     const now = Date.now();
     const cat = this.catalogue({ includeAll: true });
+    // "gemini-3.8-flash-high": the thinking level as a model-name suffix, for clients that cannot send it.
+    const suffix = !cat[req.model] && /^(.+)-(low|medium|high)$/.exec(String(req.model));
+    if (suffix && cat[suffix[1]]) req = { ...req, model: suffix[1], thinking: req.thinking ?? suffix[2] };
     const model = cat[req.model];
     const reject = (status, code, message, extra) => {
       this.store.recordUsage({ ts: now, app_id: req.app.id, model: req.model, status: 'rejected', code });
@@ -497,6 +500,8 @@ export class Scheduler {
       step('temporary');
       await g.selectModel(job.model.label);
       step('model');
+      const thinking = await g.setThinking(job.thinking ?? this.config.defaultThinking ?? 'low');
+      step('thinking');
       let text = job.prompt.text;
       const files = [...job.prompt.files];
       if (Buffer.byteLength(text) > ATTACH_THRESHOLD_BYTES) {
@@ -539,7 +544,7 @@ export class Scheduler {
       }
       step('verify_json');
       outChars = answer.text.length;
-      this.log('job_done', { account: account.id, model: job.model.id, temporary, via: answer.via, prompts, steps });
+      this.log('job_done', { account: account.id, model: job.model.id, thinking, temporary, via: answer.via, prompts, steps });
       if (json && !json.valid) {
         usage('error', 'json_invalid');
         throw new HubError(502, 'json_invalid', `the model did not return valid JSON (${json.errors.slice(0, 3).join('; ')})`, { sent: true, text: answer.text });
@@ -552,6 +557,7 @@ export class Scheduler {
         label: job.model.label,
         account: account.id,
         temporary,
+        thinking,
         via: answer.via,
         prompts,
         ms: Date.now() - started,

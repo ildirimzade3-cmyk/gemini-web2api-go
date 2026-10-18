@@ -6,7 +6,7 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
 import { authenticate, AuthThrottle, ipInCidrs, normalizeIp, parseCidr, sha256 } from './security.mjs';
-import { RequestError, buildPrompt, fromGemini, fromOpenAI, geminiJson, openAIJson } from './prompt.mjs';
+import { RequestError, buildPrompt, fromGemini, fromOpenAI, geminiJson, geminiThinking, openAIJson, openAIThinking } from './prompt.mjs';
 import { HubError } from './scheduler.mjs';
 
 // Whole request (base64 files included). The prompt text itself has its own cap in prompt.mjs.
@@ -192,6 +192,7 @@ export class ApiServer {
       'x-hub-model-label': result.label,
       'x-hub-account': result.account,
       'x-hub-deduplicated': result.deduplicated ? '1' : '0',
+      'x-hub-thinking': result.thinking ?? 'n/a',
     };
   }
 
@@ -231,6 +232,7 @@ export class ApiServer {
       model: body.model,
       prompt,
       json,
+      thinking: openAIThinking(body),
       onProgress,
       dedupeKey: this.#dedupeKey(app, req, body.model, raw),
       inChars: prompt.text.length,
@@ -261,7 +263,7 @@ export class ApiServer {
         choices: [{ index: 0, message: { role: 'assistant', content: result.text }, finish_reason: 'stop' }],
         usage,
         // Same facts as the x-hub-* headers, also here because a held response sent its headers early.
-        hub: { model_label: result.label, account: result.account, deduplicated: Boolean(result.deduplicated) },
+        hub: { model_label: result.label, account: result.account, thinking: result.thinking ?? 'n/a', deduplicated: Boolean(result.deduplicated) },
       },
       this.#meta(result),
     );
@@ -294,7 +296,7 @@ export class ApiServer {
       : null;
     const release = holdOpen(res, sse, this.config.holdMs ?? 240_000);
     const result = await this.scheduler
-      .submit({ app, model, prompt, json, onProgress, dedupeKey: this.#dedupeKey(app, req, model, raw), inChars: prompt.text.length })
+      .submit({ app, model, prompt, json, thinking: geminiThinking(body), onProgress, dedupeKey: this.#dedupeKey(app, req, model, raw), inChars: prompt.text.length })
       .finally(release);
     const usageMetadata = { promptTokenCount: estTokens(prompt.text.length), candidatesTokenCount: estTokens(result.text.length) };
     usageMetadata.totalTokenCount = usageMetadata.promptTokenCount + usageMetadata.candidatesTokenCount;

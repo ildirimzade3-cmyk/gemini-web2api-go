@@ -40,6 +40,8 @@ export function loadConfig(env = process.env) {
     // A browser with no work for this long is closed to free memory. Short enough for RAM,
     // long enough that a burst of requests reuses one open browser instead of reloading Gemini.
     idleCloseMs: int(env.HUB_IDLE_CLOSE_MIN, 3) * 60_000,
+    // Thinking level when a request names none (Gemini's own default is Low); set explicitly every time.
+    defaultThinking: ['low', 'medium', 'high'].includes(env.HUB_DEFAULT_THINKING) ? env.HUB_DEFAULT_THINKING : 'low',
     // At most this many requests wait in the queue; one more is refused at once ("queue full").
     maxQueue: int(env.HUB_MAX_QUEUE, 4),
     dedupeWindowMs: int(env.HUB_DEDUPE_MIN, 10) * 60_000,

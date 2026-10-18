@@ -13,6 +13,7 @@ import {
   judgeJson,
   openAIJson,
 } from '../src/prompt.mjs';
+import { openAIThinking, geminiThinking } from '../src/prompt.mjs';
 
 const PNG_B64 = Buffer.from('fakepng').toString('base64');
 const dataUrl = (mime = 'image/png') => `data:${mime};base64,${PNG_B64}`;
@@ -211,4 +212,18 @@ test('judgeJson', () => {
   assert.deepEqual(judgeJson('{"b":1}', schema), { text: '{"b":1}', valid: false, errors: ['$.a: required'] });
   assert.deepEqual(judgeJson('  just prose ', schema), { text: 'just prose', valid: false, errors: ['no JSON value found'] });
   assert.equal(judgeJson('[1]', null).valid, true);
+});
+
+test('thinking level from OpenAI and Gemini bodies', () => {
+  assert.equal(openAIThinking({}), null);
+  assert.equal(openAIThinking({ reasoning_effort: 'high' }), 'high');
+  assert.equal(openAIThinking({ reasoning_effort: 'minimal' }), 'low');
+  assert.equal(openAIThinking({ reasoning: { effort: 'medium' } }), 'medium');
+  assert.throws(() => openAIThinking({ reasoning_effort: 'max' }), /unsupported/);
+  assert.equal(geminiThinking({}), null);
+  assert.equal(geminiThinking({ generationConfig: { thinkingConfig: { thinkingLevel: 'HIGH' } } }), 'high');
+  assert.equal(geminiThinking({ generationConfig: { thinkingConfig: { thinkingBudget: 0 } } }), 'low');
+  assert.equal(geminiThinking({ generationConfig: { thinkingConfig: { thinkingBudget: 8000 } } }), 'medium');
+  assert.equal(geminiThinking({ generationConfig: { thinkingConfig: { thinkingBudget: 24576 } } }), 'high');
+  assert.equal(geminiThinking({ generationConfig: { thinkingConfig: { thinkingBudget: -1 } } }), null);
 });

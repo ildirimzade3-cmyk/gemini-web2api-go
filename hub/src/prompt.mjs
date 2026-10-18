@@ -139,6 +139,32 @@ export function jsonInstruction(schema) {
   return s;
 }
 
+/** Thinking level asked by an OpenAI body ("low" | "medium" | "high"), or null. */
+export function openAIThinking(body) {
+  const v = String(body?.reasoning_effort ?? body?.reasoning?.effort ?? '').toLowerCase();
+  if (!v) return null;
+  if (v === 'minimal' || v === 'none' || v === 'low') return 'low';
+  if (v === 'medium' || v === 'high') return v;
+  throw new RequestError(`unsupported reasoning_effort "${v}" (low, medium, high)`);
+}
+
+/** Thinking level asked by a Gemini body (thinkingLevel, or thinkingBudget mapped onto the three levels), or null. */
+export function geminiThinking(body) {
+  const gc = body?.generationConfig ?? body?.generation_config ?? {};
+  const tc = gc.thinkingConfig ?? gc.thinking_config;
+  if (!tc) return null;
+  const level = String(tc.thinkingLevel ?? tc.thinking_level ?? '').toLowerCase();
+  if (level) {
+    if (level === 'minimal' || level === 'low') return 'low';
+    if (level === 'medium' || level === 'high') return level;
+    throw new RequestError(`unsupported thinkingLevel "${level}" (LOW, MEDIUM, HIGH)`);
+  }
+  const budget = tc.thinkingBudget ?? tc.thinking_budget;
+  if (budget === undefined || budget === null || Number(budget) < 0) return null; // -1 = dynamic: the default
+  const b = Number(budget);
+  return b <= 2048 ? 'low' : b <= 12288 ? 'medium' : 'high';
+}
+
 /** JSON mode of an OpenAI body: null, { schema: null } or { schema }. */
 export function openAIJson(body) {
   const rf = body?.response_format;

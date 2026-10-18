@@ -307,6 +307,49 @@ export class GeminiPage {
   }
 
   /**
+   * Sets the model's thinking level ("low" | "medium" | "high") in the model menu's
+   * "Thinking level" submenu and confirms the check mark moved there. Returns the
+   * level, or "n/a" when the account/model has no such submenu (e.g. Auto).
+   */
+  async setThinking(level) {
+    const want = { low: 'Low', medium: 'Medium', high: 'High' }[level];
+    if (!want) throw new UiError('ui_changed', `unknown thinking level ${level}`);
+    const openSub = async () => {
+      await this.#openPicker();
+      const trigger = this.page.locator('gem-menu-item[value="thinking_level"]').first();
+      if (!(await trigger.count())) return null;
+      await trigger.hover().catch(() => {});
+      await trigger.click({ timeout: 5000 }).catch(() => {});
+      const item = this.page.locator('gem-menu-item').filter({ has: this.page.locator('span.label', { hasText: new RegExp(`^\\s*${want}\\s*$`) }) }).first();
+      await item.waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
+      return (await item.count()) ? item : null;
+    };
+    const close = async () => {
+      await this.page.keyboard.press('Escape').catch(() => {});
+      await this.page.keyboard.press('Escape').catch(() => {});
+    };
+    const selected = async (item) => /\bselected\b/.test((await item.getAttribute('class').catch(() => '')) || '');
+    let item = await openSub();
+    if (!item) {
+      await close();
+      return 'n/a';
+    }
+    if (await selected(item)) {
+      await close();
+      return level;
+    }
+    await human(150, 400);
+    await item.click({ timeout: 5000 });
+    await sleep(500);
+    await close();
+    item = await openSub();
+    const ok = item && (await selected(item));
+    await close();
+    if (!ok) throw new UiError('ui_changed', `the thinking level did not switch to ${want}`, { role: 'picker' });
+    return level;
+  }
+
+  /**
    * True when the chat is set to exactly `label`. The picker button often shows a
    * short name ("Flash"); when that short name fits more than one catalogue entry,
    * the open menu's checked item decides.
