@@ -229,7 +229,13 @@ export class AccountRuntime {
     this.signin = null;
     s.chrome.kill('SIGTERM');
     if (!(await waitExit(s.chrome, 15_000))) s.chrome.kill('SIGKILL');
+    // x11vnc may ignore SIGTERM; a VNC server left running would keep a door to this
+    // account's screen open, so it is killed for certain and the exit is awaited.
     s.vnc.kill('SIGTERM');
+    if (!(await waitExit(s.vnc, 3000))) {
+      s.vnc.kill('SIGKILL');
+      await waitExit(s.vnc, 3000);
+    }
     fs.rmSync(s.pwFile, { force: true });
     this.#stopDisplay();
     this.log('signin_stopped', { minutes: Math.round((Date.now() - s.startedAt) / 60000) });
