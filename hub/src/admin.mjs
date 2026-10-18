@@ -120,6 +120,14 @@ export class AdminServer {
     if ((m = /^\/api\/accounts\/(a\d+)\/(signin|done|refresh|pause|resume|remove|sleep)$/.exec(p)) && req.method === 'POST') {
       return this.#json(res, 200, await this.#accountAction(m[1], m[2], body));
     }
+    if ((m = /^\/api\/accounts\/(a\d+)\/chaos$/.exec(p)) && req.method === 'POST') {
+      if (!this.config.chaos) return this.#json(res, 404, { error: 'not found' });
+      const rt = this.scheduler.runtimes.get(m[1]);
+      if (!rt) return this.#json(res, 404, { error: 'no such account' });
+      rt.chaos = ['input', 'copy', 'send'].includes(body.kind) ? body.kind : null;
+      this.store.event('warn', 'chaos_set', m[1], { kind: rt.chaos });
+      return this.#json(res, 200, { chaos: rt.chaos });
+    }
     if (req.method === 'POST' && p === '/api/apps') return this.#json(res, 200, this.#createApp(body));
     if ((m = /^\/api\/apps\/([\w-]+)\/(revoke|update)$/.exec(p)) && req.method === 'POST') return this.#json(res, 200, this.#appAction(m[1], m[2], body));
     if (req.method === 'POST' && p === '/api/test-alert') {

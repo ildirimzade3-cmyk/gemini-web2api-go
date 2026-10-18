@@ -393,7 +393,9 @@ export class Scheduler {
     try {
       const g = await rt.open();
       step('open');
+      g.onDrift = (role, message) => this.#drift(role, message);
       await g.newChat();
+      if (this.config.chaos && rt.chaos) await g.applyChaos(rt.chaos);
       step('new_chat');
       const temporary = await g.temporaryChat();
       step('temporary');
@@ -537,6 +539,12 @@ export class Scheduler {
         if (!sent && job.tried.size < 2) return requeue();
         return fail(503, 'browser_error', err.message);
     }
+  }
+
+  /** A step still worked through a fallback, but the site changed: tell the operator once a day. */
+  #drift(role, message) {
+    this.store.event('warn', 'ui_drift', null, { role, message });
+    this.alerts.notify({ key: `drift:${role}`, title: 'gemini.google.com changed a little', message: `${message}. Answers still work; the hub keeps watching.`, everyMs: 86_400_000 });
   }
 
   #saveDiag(accountId, err, diag) {

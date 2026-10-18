@@ -36,6 +36,8 @@ export function loadConfig(env = process.env) {
     // Official Gemini API key used only to propose new selectors when the site changes.
     repairApiKey: env.HUB_REPAIR_API_KEY || env.GEMINI_REPAIR_API_KEY || '',
     repairModel: env.HUB_REPAIR_MODEL || 'gemini-3.6-flash',
+    // Test hook: lets the admin API simulate a changed site on one account (off in normal use).
+    chaos: env.HUB_CHAOS === '1',
     displayBase: int(env.HUB_DISPLAY_BASE, 100),
     vncPortBase: int(env.HUB_VNC_PORT_BASE, 15900),
   };

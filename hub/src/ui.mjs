@@ -451,6 +451,7 @@ export class GeminiPage {
     // Google's markdown is the answer; the rendered text is only a cross-check.
     if (copied && norm(copied).length >= norm(last).length * 0.5) return { text: copied.replace(/\n{2,}```$/, '\n```'), via: 'copy' };
     this.log('copy_fallback', { copied: copied.length, rendered: last.length });
+    this.onDrift?.('copy', 'the Copy button was not found; the answer was read from the page instead');
     return { text: last, via: 'render' };
   }
 
@@ -472,6 +473,33 @@ export class GeminiPage {
     await this.insert(text);
     await this.send();
     return this.waitAnswer(onProgress);
+  }
+
+  /**
+   * Test hook (only reachable when HUB_CHAOS=1): makes this page look as if Google
+   * renamed an element, so the drift detection and selector repair can be proven on
+   * the real site. Only our own copy of the page is changed.
+   */
+  async applyChaos(kind) {
+    if (!kind) return;
+    await this.page.evaluate((k) => {
+      const mutate = () => {
+        if (k === 'input') {
+          for (const el of document.querySelectorAll('div.ql-editor[contenteditable="true"], [role="textbox"][contenteditable="true"]')) {
+            el.classList.remove('ql-editor');
+            el.removeAttribute('role');
+            el.setAttribute('data-chaos', 'editor');
+          }
+        }
+        if (k === 'copy') for (const b of document.querySelectorAll('message-actions button[aria-label^="Copy" i]')) b.setAttribute('aria-label', 'Duplicate text');
+        if (k === 'send') for (const b of document.querySelectorAll('button[aria-label*="send message" i], button.send-button')) {
+          b.setAttribute('aria-label', 'Submit');
+          b.classList.remove('send-button');
+        }
+      };
+      mutate();
+      new MutationObserver(mutate).observe(document.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: ['class', 'aria-label', 'role'] });
+    }, kind);
   }
 
   /** Text-free outline for diagnostics when a step breaks. */
