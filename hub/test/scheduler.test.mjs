@@ -234,7 +234,7 @@ test('limit error BEFORE send moves the job to the second account', async (t) =>
   assert.deepEqual(rows.map((x) => [x.account_id, x.status, x.code, x.prompts]), [['a1', 'error', 'limit', 0], ['a2', 'ok', '', 1]]);
 });
 
-test('Google HTTP 429 before send: the account cools down by itself (not "needs you") and another serves', async (t) => {
+test('one Google HTTP 429 before send does not lock the account: the request is served elsewhere at once', async (t) => {
   const h = harness(t, {
     accounts: 2,
     hooks: { a1: { newChat: () => { throw new UiError('throttled', 'gemini.google.com answered HTTP 429', { sent: false }); } } },
@@ -243,7 +243,21 @@ test('Google HTTP 429 before send: the account cools down by itself (not "needs 
   assert.equal(r.account, 'a2');
   const a1 = h.store.account('a1');
   assert.equal(a1.state, 'ready');
-  assert.ok(a1.cooldown_until - Date.now() > 14 * 60_000 && a1.cooldown_until - Date.now() <= 15 * 60_000);
+  assert.equal(a1.cooldown_until, 0);
+  assert.ok(h.runtimes.a1.restUntil > Date.now(), 'a1 only waits a few seconds');
+  assert.ok(!h.alerts.calls.some((c) => c.key === 'throttled:a1'));
+});
+
+test('three Google HTTP 429s within 10 minutes pause the account for 5 minutes', async (t) => {
+  const h = harness(t, {
+    accounts: 2,
+    hooks: { a1: { newChat: () => { throw new UiError('throttled', 'gemini.google.com answered HTTP 429', { sent: false }); } } },
+  });
+  h.runtimes.a1.throttles = [Date.now() - 60_000, Date.now() - 30_000];
+  const r = await h.scheduler.submit(h.req());
+  assert.equal(r.account, 'a2');
+  const a1 = h.store.account('a1');
+  assert.ok(a1.cooldown_until - Date.now() > 4.9 * 60_000 && a1.cooldown_until - Date.now() <= 5 * 60_000);
   assert.ok(h.alerts.calls.some((c) => c.key === 'throttled:a1'));
   assert.ok(h.scheduler.accountStatus(a1, { id: MODEL_ID, label: '3.1 Pro' }).blockers.includes('cooldown'));
 });

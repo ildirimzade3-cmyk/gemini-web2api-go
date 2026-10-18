@@ -37,9 +37,9 @@ export function restAfterMs(outChars, rnd = Math.random) {
   return Math.round(Math.min(18_000, base + reading));
 }
 
-/** Pause after Google answered HTTP 429: 15 min, 1 h when it happens again within a day. */
+/** Pause after Google answered HTTP 429 three times in 10 minutes: 5 min, 15 min when it happens again within a day. */
 export function cooldownMs(previousUntil, now = Date.now()) {
-  return previousUntil && now - previousUntil < DAY ? HOUR : 15 * 60_000;
+  return previousUntil && now - previousUntil < DAY ? 15 * 60_000 : 5 * 60_000;
 }
 
 /**

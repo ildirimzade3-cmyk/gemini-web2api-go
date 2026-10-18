@@ -586,18 +586,27 @@ export class Scheduler {
         return sent ? fail(429, 'account_limit', 'the account reached a Gemini limit while answering; the prompt is not resent') : requeue();
       }
       case 'throttled': {
-        // Google's rate limit, not a check: the account rests and comes back by itself.
-        const until = now + cooldownMs(account.cooldown_until, now);
-        this.store.updateAccount(id, { cooldown_until: until });
-        this.store.event('warn', 'account_throttled', id, { until, message: err.message });
-        await rt.close('throttled');
-        this.alerts.notify({
-          key: `throttled:${id}`,
-          title: `${account.label} slowed down by Google`,
-          message: `Google answered "too many requests" (HTTP 429). ${account.label} rests until ${new Date(until).toISOString()} and then resumes by itself. If this repeats, the load is too high for the accounts.`,
-          accountId: id,
-        });
-        return sent ? fail(429, 'account_throttled', 'Google rate-limited the account while answering; the prompt is not resent') : requeue();
+        // Google's "too many requests". A single one does not lock the account: the
+        // request (nothing sent yet) is tried again 10 s later, here or on another
+        // account. Only three within 10 minutes pause the account, for a few minutes.
+        const recent = (rt.throttles = [...(rt.throttles ?? []).filter((t) => now - t < 10 * 60_000), now]);
+        this.store.event('warn', 'account_throttled', id, { count_10min: recent.length, message: err.message });
+        if (recent.length >= 3) {
+          const until = now + cooldownMs(account.cooldown_until, now);
+          this.store.updateAccount(id, { cooldown_until: until });
+          rt.throttles = [];
+          this.alerts.notify({
+            key: `throttled:${id}`,
+            title: `${account.label} slowed down by Google`,
+            message: `Google answered "too many requests" (HTTP 429) three times in 10 minutes. ${account.label} pauses until ${new Date(until).toISOString()} and then resumes by itself.`,
+            accountId: id,
+          });
+        }
+        if (sent) return fail(429, 'account_throttled', 'Google rate-limited the account while answering; the prompt is not resent');
+        rt.restUntil = now + 10_000;
+        if (recent.length >= 3) job.tried.add(id);
+        this.queue.unshift(job);
+        return undefined;
       }
       case 'challenge':
       case 'signed_out': {

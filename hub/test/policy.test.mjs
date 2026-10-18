@@ -58,9 +58,9 @@ test('parseResetTime', () => {
   assert.equal(parseResetTime('until 25:00', now), null);
 });
 
-test('cooldownMs: 15 min, 1 h when Google rate-limits again within a day', () => {
+test('cooldownMs: 5 min, 15 min when Google rate-limits again within a day', () => {
   const now = 10 * DAY;
-  assert.equal(cooldownMs(0, now), 15 * 60_000);
-  assert.equal(cooldownMs(now - HOUR, now), HOUR);
-  assert.equal(cooldownMs(now - 2 * DAY, now), 15 * 60_000);
+  assert.equal(cooldownMs(0, now), 5 * 60_000);
+  assert.equal(cooldownMs(now - HOUR, now), 15 * 60_000);
+  assert.equal(cooldownMs(now - 2 * DAY, now), 5 * 60_000);
 });
