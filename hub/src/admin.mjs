@@ -134,7 +134,7 @@ export class AdminServer {
         models: acct?.models?.length ?? 0,
       });
     }
-    if ((m = /^\/api\/accounts\/(a\d+)\/(signin|done|refresh|pause|resume|remove|sleep)$/.exec(p)) && req.method === 'POST') {
+    if ((m = /^\/api\/accounts\/(a\d+)\/(signin|done|refresh|pause|resume|remove)$/.exec(p)) && req.method === 'POST') {
       return this.#json(res, 200, await this.#accountAction(m[1], m[2], body));
     }
     if ((m = /^\/api\/accounts\/(a\d+)\/chaos$/.exec(p)) && req.method === 'POST') {
@@ -217,8 +217,6 @@ export class AdminServer {
         plan_label: a.plan_label,
         identity: a.identity,
         models: a.models,
-        sleep_start_min: a.sleep_start_min,
-        sleep_len_min: a.sleep_len_min,
         last_job_at: a.last_job_at,
         warm: Boolean(rt?.warm),
         busy: Boolean(rt?.busy),
@@ -265,13 +263,6 @@ export class AdminServer {
         if (body.confirm !== id) throw new HubError(400, 'confirm', 'send {"confirm": "<account id>"} to remove');
         await this.scheduler.removeAccount(id);
         return { removed: id };
-      case 'sleep': {
-        const start = Number(body.sleep_start_min);
-        const len = Number(body.sleep_len_min);
-        if (!(start >= 0 && start < 1440 && len >= 0 && len <= 720)) throw new HubError(400, 'bad_sleep', 'sleep_start_min 0..1439, sleep_len_min 0..720');
-        this.store.updateAccount(id, { sleep_start_min: Math.round(start), sleep_len_min: Math.round(len) });
-        return this.store.account(id);
-      }
       default:
         throw new HubError(404, 'not_found', 'unknown action');
     }

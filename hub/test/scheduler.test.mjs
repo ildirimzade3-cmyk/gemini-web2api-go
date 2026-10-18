@@ -37,6 +37,10 @@ class FakePage {
     if (this.hooks.currentModel) return this.hooks.currentModel(this);
     return this.shown;
   }
+  async readUsage() {
+    this.usageReads = (this.usageReads ?? 0) + 1;
+    return { meters: this.hooks.meters ?? [{ name: '5h', used_pct: 10, resets_at: Date.now() + 3_600_000 }], raw: '' };
+  }
   async verifyModel(label) {
     const shown = await this.currentModel();
     return { ok: shown === label || label.endsWith(shown), shown };
@@ -110,8 +114,8 @@ function harness(t, { accounts = 1, plan = 'paid', hooks = {}, configOverride = 
   const pages = {};
   for (let i = 1; i <= accounts; i++) {
     const id = `a${i}`;
-    store.insertAccount({ id, label: `Account ${i}`, created_at: now - 1000 + i, state: 'ready', state_since: now, sleep_start_min: 0, sleep_len_min: 0 });
-    store.updateAccount(id, { plan, models: [{ id: MODEL_ID, label: LABEL, enabled: true }] });
+    store.insertAccount({ id, label: `Account ${i}`, created_at: now - 1000 + i, state: 'ready', state_since: now });
+    store.updateAccount(id, { plan, models: [{ id: MODEL_ID, label: LABEL, enabled: true }], usage: { meters: [{ name: '5h', used_pct: 10, resets_at: now + 3_600_000 }], read_at: now } });
     pages[id] = new FakePage(id, hooks[id] ?? {});
   }
   store.insertApp({ id: 'app1', name: 'one', key_hash: 'h1', key_hint: 'h1', cidrs: '*', models: '*', daily_cap: null, created_at: now });
@@ -239,7 +243,7 @@ test('Google HTTP 429 before send: the account cools down by itself (not "needs 
   assert.equal(r.account, 'a2');
   const a1 = h.store.account('a1');
   assert.equal(a1.state, 'ready');
-  assert.ok(a1.cooldown_until - Date.now() > 2.9 * 3_600_000);
+  assert.ok(a1.cooldown_until - Date.now() > 14 * 60_000 && a1.cooldown_until - Date.now() <= 15 * 60_000);
   assert.ok(h.alerts.calls.some((c) => c.key === 'throttled:a1'));
   assert.ok(h.scheduler.accountStatus(a1, { id: MODEL_ID, label: '3.1 Pro' }).blockers.includes('cooldown'));
 });
@@ -371,24 +375,35 @@ test('JSON mode: valid first time needs one prompt; invalid twice -> 502 json_in
   assert.equal(usageRows(h2.store)[0].prompts, 2);
 });
 
-test('budget exhausted on all accounts -> 429 capacity with retryAfter', async (t) => {
-  const h = harness(t, { accounts: 2, plan: 'free' }); // free pro budget is 3
-  for (const id of ['a1', 'a2']) {
-    h.store.recordUsage({ ts: Date.now() - 1000, app_id: 'app1', account_id: id, model: MODEL_ID, status: 'ok', sent: true, prompts: 3 });
-  }
+test('every account at the 95 % meter line -> 429 capacity at once, with reasons and the reset time', async (t) => {
+  const h = harness(t, { accounts: 2 });
+  const reset = Date.now() + 2 * 3_600_000;
+  for (const id of ['a1', 'a2']) h.store.updateAccount(id, { usage: { meters: [{ name: '5h', used_pct: 97, resets_at: reset }], read_at: Date.now() } });
   await assert.rejects(h.scheduler.submit(h.req()), (e) => {
     assert.equal(e.status, 429);
     assert.equal(e.code, 'capacity');
-    assert.ok(e.retryAfter > 3600 && e.retryAfter <= 86_400, String(e.retryAfter));
+    assert.match(e.message, /usage_5h/);
+    assert.ok(Math.abs(e.retryAfter - 7200) <= 2, String(e.retryAfter));
     return true;
   });
   assert.ok(h.alerts.calls.some((c) => c.key === `capacity:${MODEL_ID}`));
   assert.equal(h.pages.a1.sends + h.pages.a2.sends, 0);
-  assert.equal(usageRows(h.store).at(-1).code, 'capacity');
-  // capacity() reports the same picture
   const cap = h.scheduler.capacity().find((c) => c.model === MODEL_ID);
-  assert.equal(cap.remaining_now, 0);
+  assert.equal(cap.accounts_available, 0);
+  assert.equal(cap.next_free_at, reset);
   assert.equal(cap.rejected_24h, 1);
+});
+
+test('a stale meter is read before the account is used; a full one moves the job on, nothing sent', async (t) => {
+  const reset = Date.now() + 3_600_000;
+  const h = harness(t, { accounts: 2, hooks: { a1: { meters: [{ name: '5h', used_pct: 99, resets_at: reset }] } } });
+  h.store.updateAccount('a1', { usage: { meters: [{ name: '5h', used_pct: 50, resets_at: reset }], read_at: Date.now() - 3_600_000 } });
+  h.store.updateAccount('a2', { usage: { meters: [{ name: '5h', used_pct: 60, resets_at: reset }], read_at: Date.now() } });
+  const r = await h.scheduler.submit(h.req());
+  assert.equal(r.account, 'a2');
+  assert.equal(h.pages.a1.usageReads, 1);
+  assert.equal(h.pages.a1.sends, 0);
+  assert.equal(h.store.account('a1').usage.meters[0].used_pct, 99);
 });
 
 test('accounts that are not ready are never used; none ready -> 503 no_account', async (t) => {

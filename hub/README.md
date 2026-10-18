@@ -33,27 +33,32 @@ bir makinede tek bir sıradan Chrome görür.
 |---|---|
 | 401 | anahtar yanlış ya da bu makineden kullanılamaz |
 | 404 `model_not_found` | hiçbir hesap bu modeli sunmuyor |
-| 429 `capacity` (+`Retry-After`) | hesapların güvenli günlük payı doldu — yük hesapların kaldırabileceğinden fazla |
+| 429 `capacity` (+`Retry-After`) | bu modeli sunan bütün hesaplar Google'a göre dolu ya da beklemede; mesajda sebepler ve sonraki boşalma saati |
 | 429 `app_cap` / `queue_full` | bu uygulamanın kendi sınırı |
-| 429 `account_limit` | Google cevap sırasında limit gösterdi; istem tekrar gönderilmez |
+| 429 `account_limit` / `account_throttled` | Google cevap sırasında limit ya da 429 verdi; istem tekrar gönderilmez |
 | 502 `model_changed` | Gemini başka modelle cevap verdi; cevap atıldı |
 | 503 `no_account` / `account_stopped` / `upstream_ui_changed` | hesaplar sizi bekliyor ya da site değişti |
 
-## Hesap güvenliği (neden ban riski düşük)
+## Hesaplar ve yönlendirme (router)
 
-- Hesap başına ayrı kalıcı profil, sabit makine/IP/saat dilimi (VPS Virginia'da: `America/New_York`).
-- Giriş, **otomasyon bağlı olmayan düz Chrome**'da sizin tarafınızdan bir kez yapılır (VNC ile).
-- Çalışırken Chrome'a hata ayıklama portu açılmaz (CDP pipe), Chrome kendi sandbox'ıyla çalışır.
-- Hesap başına **aynı anda tek iş**, her cevaptan sonra 6–40 sn "okuma" molası, saatlik üst sınır,
-  model başına günlük **güvenli pay** (tüketici planı limitlerinin yaklaşık yarısı), her gün
-  ±30 dk kayan 5 saatlik dinlenme (hesaplar 3'er saat kaydırılır, hub hiç uyumaz).
-- Google bir limit gösterirse o model o hesapta sıfırlanma saatine kadar durur ve payı,
-  limitin göründüğü sayının %60'ına iner. "Olağandışı etkinlik", doğrulama, oturum kapanması:
-  hesap anında durur, size bildirim gider, hub hiçbir şeyi otomatik denemez.
+- Her hesabın modelleri kendi model seçicisinden okunur; istek o modeli sunan hesaba gider
+  (ücretsiz hesaplarda bugün yalnız **Auto** seçilebilir; Pro/Argon orada satış düğmesidir).
+- Bir hesabın çalışıp çalışamayacağına **Google karar verir**: Gemini'nin kullanım sayfası
+  (`gemini.google.com/usage`: 5 saatlik pencere + haftalık tavan, yüzde ve sıfırlanma saati) ve
+  Google'ın gösterdiği limit / doğrulama / çıkış / HTTP 429 mesajları. Yerel tahmin, istem sayısı
+  bütçesi ya da günlük dinlenme yoktur.
+- Kullanım %95'e (5 saatlik ya da haftalık) ulaşınca hesap sıfırlanma saatine kadar iş almaz; okuma
+  30 dakikadan eskiyse hesap kullanılmadan önce sayfa yeniden okunur (istem gönderip denemez).
+- Hesaplar paralel çalışır (hesap başına aynı anda bir istem, cevaplar arası 2–18 sn).
+- Hiçbir hesap şu an alamıyorsa istek **beklemez**: hemen `429 capacity` (ya da `503 no_account`)
+  döner; mesajda her hesabın durumu ve bir sonraki boşalma saati, `Retry-After` başlığında saniye olarak.
+  Uygulamalar `GET /v1/hub/accounts` ile her hesabın yüzdesini, sıfırlanma saatini ve uygunluğunu görür.
+- Google limit gösterirse o model o hesapta sıfırlanmaya kadar durur; HTTP 429'da hesap 15 dk
+  (aynı gün tekrarında 1 saat) bekler ve kendiliğinden döner; doğrulama / çıkışta hesap durur ve
+  telefona bildirim gider. Hepsi olay kaydına yazılır.
 - Google'a ulaşmış bir istem **asla yeniden gönderilmez**; başka hesaba yalnız hiçbir şey
-  gönderilmemişse geçer. Her istek yeni (mümkünse geçici) bir sohbette.
-- Uygulamalar arasında adil sıra; uygulama başına günlük üst sınır ve model listesi.
-- Yönetim sayfasındaki **Kapasite** tablosu, istenen yükün güvenli kapasiteyi aşıp aşmadığını gösterir.
+  gönderilmemişse geçer. Her istek yeni bir geçici sohbette. Uzun düşünen modeller kesilmez.
+- 5–7 saatte bir istemsiz kısa ziyaret oturumu taze tutar; giriş bir kez, otomatik algılanır.
 
 ## Güvenlik
 

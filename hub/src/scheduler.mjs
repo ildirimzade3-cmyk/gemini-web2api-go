@@ -1,10 +1,12 @@
 // The hub's brain: which account answers which request, and when.
 //
-// Rules (account safety first):
-// - one prompt at a time per account, a human-like rest after every answer, an
-//   hourly cap, a daily budget per model and a daily rest window;
-// - any limit, check or sign-out Google shows stops that account (or that model on
-//   it) at once; checks and sign-outs wait for the operator;
+// Rules:
+// - one prompt at a time per account and a short human-like rest after every answer;
+// - whether an account can work is what Google says: its usage page (5-hour and
+//   weekly meters, stop at 95 % until the reset) and the limits, checks, sign-outs
+//   and HTTP 429 it shows; checks and sign-outs wait for the operator;
+// - when no account can take a request now, the caller hears it at once (with the
+//   reasons and when the next account frees up) instead of waiting for hours;
 // - a prompt that reached Google is never sent again (no retry after `sent`); a
 //   request may move to another account only while nothing was sent;
 // - the requested model is used or the request fails: never a silent substitute.
@@ -14,7 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { AccountRuntime } from './account.mjs';
 import { SelectorBook, UiError, ATTACH_THRESHOLD_BYTES, ATTACHED_PROMPT_INSTRUCTION } from './ui.mjs';
-import { budgetFor, cooldownMs, hourlyCap, meterState, modelClass, modelId, restAfterMs, restState, UNKNOWN_RESET_MS, defaultSleep } from './policy.mjs';
+import { cooldownMs, meterState, modelClass, modelId, restAfterMs, UNKNOWN_RESET_MS } from './policy.mjs';
 import { judgeJson } from './prompt.mjs';
 
 const DAY = 86_400_000;
@@ -74,7 +76,7 @@ export class Scheduler {
     const ids = this.store.accounts().map((a) => Number(a.id.slice(1)));
     const n = (ids.length ? Math.max(...ids) : 0) + 1;
     const now = Date.now();
-    const account = { id: `a${n}`, label: label || `Hesap ${n}`, created_at: now, state: 'new', state_since: now, ...defaultSleep(n - 1) };
+    const account = { id: `a${n}`, label: label || `Hesap ${n}`, created_at: now, state: 'new', state_since: now };
     this.store.insertAccount(account);
     this.store.event('info', 'account_added', account.id, { label: account.label });
     this.#runtime(this.store.account(account.id), n - 1);
@@ -194,74 +196,63 @@ export class Scheduler {
     return out;
   }
 
-  /** Remaining safe prompts and the reasons an account cannot take `model` now. */
+  /** Why an account cannot take `model` now (empty = it can), and its meter. */
   accountStatus(account, model, now = Date.now()) {
     const lim = this.store.limit(account.id, model.id);
-    const { budget, source } = budgetFor(account, model, lim);
-    const used = this.store.promptsSince(account.id, model.id, now - DAY);
-    const hourUsed = this.store.promptsSince(account.id, null, now - HOUR);
-    const rest = restState(account, now);
     const rt = this.runtimes.get(account.id);
+    const meter = meterState(account, this.config.usageStop ?? {}, now);
     const blockers = [];
     if (account.state !== 'ready') blockers.push(account.state);
-    if (rest.resting) blockers.push('resting');
-    if (lim?.exhausted_until > now) blockers.push('limit');
     if (account.cooldown_until > now) blockers.push('cooldown');
-    const meter = meterState(account, this.config.usageStop ?? {}, now);
+    if (lim?.exhausted_until > now) blockers.push('limit');
     blockers.push(...meter.blockers);
-    // Gemini meters compute, not prompts: with a fresh meter reading the count budget is only advisory.
-    if (used >= budget && !meter.fresh) blockers.push('budget');
-    if (hourUsed >= hourlyCap(account)) blockers.push('hourly');
     if (rt?.signin) blockers.push('signin');
     const entry = account.models.find((m) => m.id === model.id);
     if (!entry) blockers.push('no_model');
     else if (entry.enabled === false) blockers.push('model_disabled');
+    const until = Math.max(account.cooldown_until > now ? account.cooldown_until : 0, lim?.exhausted_until > now ? lim.exhausted_until : 0, meter.until);
     return {
-      budget,
-      budget_source: source,
-      used,
-      remaining: Math.max(0, budget - used),
-      hour_used: hourUsed,
+      prompts_24h: this.store.promptsSince(account.id, model.id, now - DAY),
       exhausted_until: lim?.exhausted_until > now ? lim.exhausted_until : 0,
-      observed_limit: lim?.observed_limit ?? null,
-      resting_until: rest.until,
-      meter: { five_hour: meter.five, weekly: meter.weekly, read_at: meter.read_at, until: meter.until },
+      meter: { five_hour: meter.five, weekly: meter.weekly, read_at: meter.read_at, stale: meter.stale },
+      available_again_at: until,
       blockers,
     };
   }
 
   /** What apps may see about the accounts: label, masked identity, plan, models, meters, availability. */
   publicStatus(now = Date.now()) {
+    const iso = (t) => (t ? new Date(t).toISOString() : null);
     return this.store.accounts().map((a) => {
       const meter = meterState(a, this.config.usageStop ?? {}, now);
-      const rest = restState(a, now);
-      const reasons = [...(a.state !== 'ready' ? [a.state] : []), ...(a.cooldown_until > now ? ['cooldown'] : []), ...meter.blockers, ...(rest.resting ? ['resting'] : [])];
+      const reasons = [...(a.state !== 'ready' ? [a.state] : []), ...(a.cooldown_until > now ? ['cooldown'] : []), ...meter.blockers];
       return {
         account: a.id,
         label: a.label,
         identity: a.identity,
         plan: a.plan,
-        models: a.models.map((m) => m.id),
+        models: a.models.filter((m) => m.enabled !== false).map((m) => m.id),
         usage: {
           five_hour_pct: meter.five?.used_pct ?? null,
-          five_hour_resets_at: meter.five?.resets_at ? new Date(meter.five.resets_at).toISOString() : null,
+          five_hour_resets_at: iso(meter.five?.resets_at),
           weekly_pct: meter.weekly?.used_pct ?? null,
-          weekly_resets_at: meter.weekly?.resets_at ? new Date(meter.weekly.resets_at).toISOString() : null,
-          read_at: meter.read_at ? new Date(meter.read_at).toISOString() : null,
+          weekly_resets_at: iso(meter.weekly?.resets_at),
+          read_at: iso(meter.read_at),
         },
+        busy: Boolean(this.runtimes.get(a.id)?.busy),
         available: reasons.length === 0,
         unavailable_reasons: reasons,
-        available_again_at: a.cooldown_until > now ? new Date(a.cooldown_until).toISOString() : meter.until ? new Date(meter.until).toISOString() : rest.until ? new Date(rest.until).toISOString() : null,
+        available_again_at: iso(Math.max(a.cooldown_until > now ? a.cooldown_until : 0, meter.until)),
       };
     });
   }
 
-  /** Per model: what the accounts can safely carry today and what was asked of them. */
+  /** Per model: which accounts can take it now, which cannot and until when, and the last 24 h. */
   capacity(now = Date.now()) {
     const cat = this.catalogue({ includeAll: true });
     const accounts = this.store.accounts();
     const demand = this.store.q(
-      `SELECT model, COUNT(*) AS n, SUM(CASE WHEN code IN ('capacity','queue_full','app_cap') THEN 1 ELSE 0 END) AS rejected
+      `SELECT model, COUNT(*) AS n, SUM(CASE WHEN code IN ('capacity','no_account','queue_full','app_cap') THEN 1 ELSE 0 END) AS rejected
        FROM usage WHERE ts >= ? GROUP BY model`,
     ).all(now - DAY);
     const byModel = Object.fromEntries(demand.map((d) => [d.model, d]));
@@ -269,18 +260,18 @@ export class Scheduler {
       const per = accounts
         .filter((a) => m.accounts.includes(a.id))
         .map((a) => ({ account: a.id, label: a.label, state: a.state, ...this.accountStatus(a, m, now) }));
-      const healthy = per.filter((p) => !p.blockers.some((b) => ['new', 'paused', 'attention', 'no_model', 'model_disabled'].includes(b)));
-      const safePerDay = healthy.reduce((n, p) => n + p.budget, 0);
       const d = byModel[m.id] ?? { n: 0, rejected: 0 };
+      const waiting = per.filter((p) => p.blockers.length && p.available_again_at);
       return {
         model: m.id,
         label: m.label,
         class: m.class,
-        safe_per_day: safePerDay,
-        remaining_now: healthy.reduce((n, p) => n + (p.blockers.length ? 0 : p.remaining), 0),
+        accounts_total: per.length,
+        accounts_available: per.filter((p) => !p.blockers.length).length,
+        next_free_at: waiting.length ? Math.min(...waiting.map((p) => p.available_again_at)) : 0,
         requests_24h: Number(d.n),
         rejected_24h: Number(d.rejected),
-        overloaded: Number(d.rejected) > 0 || Number(d.n) > safePerDay * 0.9,
+        overloaded: Number(d.rejected) > 0,
         accounts: per,
       };
     });
@@ -349,36 +340,35 @@ export class Scheduler {
     });
   }
 
-  /** Whether any account can take `model` now or later today (not ever -> refuse at once). */
+  /**
+   * Whether an account can take `model` now (busy ones count: they free up within
+   * minutes). When every account is blocked by Google (meter at the stop line, limit,
+   * 429 pause) or waits for the operator, the caller is told at once, with the
+   * reasons and the time the next account frees up.
+   */
   #couldServe(model, now) {
     const accounts = this.store.accounts().filter((a) => model.accounts.includes(a.id));
     const statuses = accounts.map((a) => ({ a, s: this.accountStatus(a, model, now) }));
-    const usable = statuses.filter(({ s }) => !s.blockers.some((b) => ['new', 'paused', 'attention', 'no_model', 'model_disabled'].includes(b)));
-    if (!usable.length) {
-      return { ok: false, status: 503, code: 'no_account', message: `no healthy account offers ${model.label} right now (signed out, paused or waiting for the operator)`, retryAfter: 600 };
+    if (statuses.some(({ s }) => !s.blockers.length)) return { ok: true };
+    const why = statuses
+      .map(({ a, s }) => {
+        const m = s.meter.five_hour ? ` 5h ${s.meter.five_hour.used_pct}%, weekly ${s.meter.weekly?.used_pct ?? '?'}%` : '';
+        const t = s.available_again_at ? ` until ${new Date(s.available_again_at).toISOString()}` : '';
+        return `${a.label}: ${s.blockers.join('+')}${m}${t}`;
+      })
+      .join('; ');
+    const timed = statuses.filter(({ s }) => s.available_again_at);
+    if (!timed.length) {
+      return { ok: false, status: 503, code: 'no_account', message: `no account can serve ${model.label} now [${why}]`, retryAfter: 600 };
     }
-    const soon = usable.filter(({ s }) => !s.blockers.some((b) => ['limit', 'budget', 'usage_5h', 'usage_weekly', 'cooldown'].includes(b)));
-    if (!soon.length) {
-      const until = Math.min(...usable.map(({ s, a }) => (a.cooldown_until > now ? a.cooldown_until : 0) || s.meter.until || s.exhausted_until || this.#budgetFreesAt(a, model, now)));
-      const why = usable
-        .map(({ a, s }) => `${a.label}: ${s.blockers.filter((b) => b !== 'resting').join('+') || 'busy'}${s.meter.five_hour ? ` (5h ${s.meter.five_hour.used_pct}%, weekly ${s.meter.weekly?.used_pct ?? '?'}%)` : ''}`)
-        .join('; ');
-      return {
-        ok: false,
-        status: 429,
-        code: 'capacity',
-        message: `every account is at its safe usage line for ${model.label} [${why}]; next free slot ${new Date(until).toISOString()}`,
-        retryAfter: Math.max(60, Math.ceil((until - now) / 1000)),
-      };
-    }
-    return { ok: true };
-  }
-
-  #budgetFreesAt(account, model, now) {
-    const row = this.store
-      .q('SELECT ts FROM usage WHERE account_id = ? AND model = ? AND prompts > 0 AND ts >= ? ORDER BY ts LIMIT 1')
-      .get(account.id, model.id, now - DAY);
-    return row ? row.ts + DAY : now + HOUR;
+    const until = Math.min(...timed.map(({ s }) => s.available_again_at));
+    return {
+      ok: false,
+      status: 429,
+      code: 'capacity',
+      message: `every account that offers ${model.label} is full or paused by Google [${why}]; next free at ${new Date(until).toISOString()}`,
+      retryAfter: Math.max(1, Math.ceil((until - now) / 1000)),
+    };
   }
 
   async #tick() {
@@ -413,7 +403,7 @@ export class Scheduler {
     if (i >= 0) this.queue.splice(i, 1);
   }
 
-  /** Best free account for the job: warm first, then most remaining budget, then least recently used. */
+  /** Best free account for the job (see the sort below). */
   #pick(job, now) {
     const candidates = [];
     for (const a of this.store.accounts()) {
@@ -427,15 +417,9 @@ export class Scheduler {
     if (!candidates.length) return null;
     const warmCount = [...this.runtimes.values()].filter((r) => r.warm).length;
     // Spread the load by Gemini's own meter (5-hour window, in 20-point steps), then
-    // prefer an open browser, then the most remaining count budget, then least recently used.
+    // prefer an open browser, then the least recently used account.
     const band = (c) => Math.floor((c.s.meter.five_hour?.used_pct ?? 0) / 20);
-    candidates.sort(
-      (x, y) =>
-        band(x) - band(y) ||
-        Number(y.rt.warm) - Number(x.rt.warm) ||
-        y.s.remaining / y.s.budget - x.s.remaining / x.s.budget ||
-        x.rt.lastUsed - y.rt.lastUsed,
-    );
+    candidates.sort((x, y) => band(x) - band(y) || Number(y.rt.warm) - Number(x.rt.warm) || x.rt.lastUsed - y.rt.lastUsed);
     const best = candidates[0];
     if (!best.rt.warm && warmCount >= this.config.maxWarmBrowsers) {
       // Make room: close the idle warm browser used longest ago; wait when all are busy.
@@ -478,6 +462,14 @@ export class Scheduler {
     try {
       const g = await rt.open();
       step('open');
+      // Know before writing: an old meter reading is refreshed from the usage page first.
+      if (meterState(this.store.account(account.id), this.config.usageStop ?? {}).stale) {
+        const r = await g.readUsage();
+        this.store.updateAccount(account.id, { usage: { meters: r.meters, read_at: Date.now() } });
+        const fresh = meterState(this.store.account(account.id), this.config.usageStop ?? {});
+        if (fresh.blockers.length) throw new UiError('meter_full', `usage meter at the stop line (${fresh.blockers.join('+')})`);
+        step('meter');
+      }
       g.onDrift = (role, message) => this.#drift(role, message);
       await g.newChat();
       if (this.config.chaos && rt.chaos) await g.applyChaos(rt.chaos);
@@ -586,9 +578,11 @@ export class Scheduler {
         this.alerts.notify({
           key: `limit:${id}:${job.model.id}`,
           title: `${account.label}: ${job.model.label} limit`,
-          message: `Google showed a limit after ${used} prompts in 24 h. ${job.model.label} rests on this account until ${new Date(until).toISOString()}; its budget is now 60 % of that count.`,
+          message: `Google showed a limit after ${used} prompts in 24 h. ${job.model.label} rests on this account until ${new Date(until).toISOString()}.`,
           accountId: id,
         });
+        // The usage page says when the window really resets; read it now.
+        setTimeout(() => this.readUsage(id).catch(() => {}), 1000);
         return sent ? fail(429, 'account_limit', 'the account reached a Gemini limit while answering; the prompt is not resent') : requeue();
       }
       case 'throttled': {
@@ -618,6 +612,8 @@ export class Scheduler {
         });
         return sent ? fail(503, 'account_stopped', 'the account was stopped by a Google check; the prompt is not resent') : requeue();
       }
+      case 'meter_full':
+        return requeue();
       case 'model_unavailable':
         this.refreshAccount(id).catch(() => {});
         return requeue();
@@ -670,17 +666,16 @@ export class Scheduler {
     for (const a of this.store.accounts()) {
       const rt = this.runtimes.get(a.id);
       if (!rt || rt.busy || rt.signin) continue;
-      const rest = restState(a, now);
-      if (rt.warm && (rest.resting || now - rt.lastUsed > this.config.idleCloseMs || a.state !== 'ready')) {
-        await rt.close(rest.resting ? 'rest' : 'idle');
+      if (rt.warm && (now - rt.lastUsed > this.config.idleCloseMs || a.state !== 'ready')) {
+        await rt.close('idle');
         continue;
       }
-      // Keep the Google session fresh the way a person does: every 5-7 hours (outside the
-      // rest window) Gemini is opened for about a minute, no prompt. Chrome itself then
+      // Keep the Google session fresh the way a person does: every 5-7 hours Gemini is
+      // opened for about a minute, no prompt. Chrome itself then
       // rotates the session cookies, so an idle account is never signed out for staleness.
       const quietFor = now - Math.max(a.last_open_at, a.last_job_at);
       const visitEvery = (5 + ((a.id.charCodeAt(1) + Math.floor(now / 86_400_000)) % 3)) * HOUR;
-      if (a.state === 'ready' && !rest.resting && !rt.warm && quietFor > visitEvery) {
+      if (a.state === 'ready' && !rt.warm && quietFor > visitEvery) {
         rt.busy = true;
         try {
           const facts = await rt.inspect();
@@ -700,15 +695,17 @@ export class Scheduler {
       }
     }
     for (const [k, v] of this.inflight) if (v.done && now - v.at > this.config.dedupeWindowMs) this.inflight.delete(k);
-    // Tell the operator before refusals start: demand near the safe daily capacity.
+    // Tell the operator when every account of a model is nearly full (5-hour meter >= 85 %).
     if (now - (this.lastCapacityCheck ?? 0) > 30 * 60_000) {
       this.lastCapacityCheck = now;
       for (const c of this.capacity(now)) {
-        if (c.requests_24h > c.safe_per_day * 0.8 || c.rejected_24h > 0) {
+        const usable = c.accounts.filter((p) => !p.blockers.some((b) => ['new', 'paused', 'attention', 'no_model', 'model_disabled'].includes(b)));
+        const nearlyFull = usable.length && usable.every((p) => (p.meter.five_hour?.used_pct ?? 0) >= 85 || p.blockers.length);
+        if (nearlyFull || c.rejected_24h > 0) {
           this.alerts.notify({
             key: `capacity:${c.model}`,
-            title: `${c.label}: near the safe limit`,
-            message: `${c.requests_24h} requests in 24 h, ${c.rejected_24h} refused; the signed-in accounts can safely carry about ${c.safe_per_day} a day. Add an account or lower the load.`,
+            title: `${c.label}: accounts nearly full`,
+            message: `Every account offering ${c.label} is at 85 % or more of its 5-hour Gemini allowance, or requests were refused (${c.rejected_24h} in 24 h). Add an account or lower the load.`,
           });
         }
       }

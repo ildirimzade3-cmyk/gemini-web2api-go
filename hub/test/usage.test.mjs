@@ -41,16 +41,18 @@ test('reset phrases: relative, dated, time of day, "left" percentages', () => {
   assert.equal(m[0].used_pct, 65);
 });
 
-test('meterState blocks above the stop lines until the reset, and reports freshness', () => {
+test('meterState blocks at 95 % until the reset, and reports a stale reading', () => {
   const acct = (five, weekly, readAgo = 60_000) => ({
     usage: { read_at: NOW - readAgo, meters: [{ name: '5h', used_pct: five, resets_at: NOW + 3_600_000 }, { name: 'weekly', used_pct: weekly, resets_at: NOW + 86_400_000 }] },
   });
   assert.deepEqual(meterState(acct(28, 7), {}, NOW).blockers, []);
-  const full = meterState(acct(80, 7), {}, NOW);
+  assert.deepEqual(meterState(acct(94, 94), {}, NOW).blockers, []);
+  const full = meterState(acct(95, 7), {}, NOW);
   assert.deepEqual(full.blockers, ['usage_5h']);
   assert.equal(full.until, NOW + 3_600_000);
-  assert.deepEqual(meterState(acct(10, 90), {}, NOW).blockers, ['usage_weekly']);
-  assert.equal(meterState(acct(10, 10, 3 * 3_600_000), {}, NOW).fresh, false);
+  assert.deepEqual(meterState(acct(10, 96), {}, NOW).blockers, ['usage_weekly']);
+  assert.equal(meterState(acct(10, 10, 31 * 60_000), {}, NOW).stale, true);
+  assert.equal(meterState(acct(10, 10, 60_000), {}, NOW).stale, false);
   // a full meter stays a blocker even when the reading is old, until its reset time
   assert.deepEqual(meterState(acct(100, 7, 3 * 3_600_000), {}, NOW).blockers, ['usage_5h']);
   assert.deepEqual(meterState({ usage: {} }, {}, NOW).blockers, []);

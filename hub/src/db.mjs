@@ -19,8 +19,8 @@ CREATE TABLE IF NOT EXISTS accounts (
   identity TEXT NOT NULL DEFAULT '',      -- masked e-mail as shown by the page
   models TEXT NOT NULL DEFAULT '[]',      -- catalogue read from the model picker
   models_at INTEGER NOT NULL DEFAULT 0,
-  sleep_start_min INTEGER NOT NULL,       -- UTC minute of day the daily rest starts
-  sleep_len_min INTEGER NOT NULL,
+  sleep_start_min INTEGER NOT NULL DEFAULT 0,  -- unused since 18 Oct (daily rest window removed)
+  sleep_len_min INTEGER NOT NULL DEFAULT 0,
   last_open_at INTEGER NOT NULL DEFAULT 0,
   last_job_at INTEGER NOT NULL DEFAULT 0,
   usage TEXT NOT NULL DEFAULT '{}',       -- Gemini's own usage meter, read from /usage
@@ -111,8 +111,8 @@ export class Store {
   insertAccount(a) {
     this.q(
       `INSERT INTO accounts (id, label, created_at, state, state_reason, state_since, sleep_start_min, sleep_len_min)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(a.id, a.label, a.created_at, a.state, a.state_reason ?? '', a.state_since, a.sleep_start_min, a.sleep_len_min);
+       VALUES (?, ?, ?, ?, ?, ?, 0, 0)`,
+    ).run(a.id, a.label, a.created_at, a.state, a.state_reason ?? '', a.state_since);
   }
   updateAccount(id, fields) {
     const cols = Object.keys(fields);

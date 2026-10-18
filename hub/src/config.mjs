@@ -29,7 +29,7 @@ export function loadConfig(env = process.env) {
     // Network allowlist checked on every connection before anything else.
     allowCidrs: list(env.HUB_ALLOW_CIDRS, '127.0.0.0/8,100.64.0.0/10,172.16.0.0/12'),
     // Gemini usage meter stop lines (percent used): the account rests until the window resets.
-    usageStop: { stop5h: int(env.HUB_USAGE_STOP_5H, 80), stopWeekly: int(env.HUB_USAGE_STOP_WEEKLY, 85) },
+    usageStop: { stop5h: int(env.HUB_USAGE_STOP_5H, 95), stopWeekly: int(env.HUB_USAGE_STOP_WEEKLY, 95) },
     maxWarmBrowsers: int(env.HUB_MAX_WARM, 3),
     idleCloseMs: int(env.HUB_IDLE_CLOSE_MIN, 20) * 60_000,
     dedupeWindowMs: int(env.HUB_DEDUPE_MIN, 10) * 60_000,
