@@ -3,41 +3,60 @@
 Hub, Gemini hesaplarını tek adreste toplar ve **resmî OpenAI ya da Gemini API'si gibi**
 konuşur. Uygulamanın tek bilmesi gereken: **adres + anahtar + model adı.**
 
-## 1. Adresler
+## 1. Bilgisayar gerekmez
 
-| Uygulama nerede çalışıyor | OpenAI uyumlu adres | Gemini uyumlu adres |
+Hub **VPS'te 7/24 çalışan bir sunucu servisidir** (yeniden başlatmada kendiliğinden açılır).
+Bilgisayarın kapalı olsa da çalışır. Hesap tarayıcıları da, oturumlar da sunucuda durur.
+
+| Uygulama nerede | Adres | Bilgisayar gerekir mi |
 |---|---|---|
-| VPS'teki Docker (n8n dahil) | `http://host.docker.internal:18090/v1` | `http://host.docker.internal:18090` |
-| VPS'in kendisi | `http://127.0.0.1:18090/v1` | `http://127.0.0.1:18090` |
-| Senin bilgisayarın (Tailscale) | `http://100.102.156.33:18090/v1` | `http://100.102.156.33:18090` |
-| Başka bir sunucu | önce Tailscale'e ekle, sonra `ssh miraz-vps gemini-hub-allow <o sunucunun 100.x IP'si>` | aynı |
+| **VPS'teki Docker** (n8n dahil) | `http://host.docker.internal:18090` | hayır |
+| **VPS'in kendisi** | `http://127.0.0.1:18090` | hayır |
+| **Başka bir sunucu / bilgisayar** (kendi uygulamaların, laptop, başka VPS) | `http://100.102.156.33:18090` | hayır, o makinede Tailscale yeterli |
 
-Docker'da `host.docker.internal` için compose'a şunu ekle (n8n'de zaten var):
+OpenAI uyumlu kullanımda adresin sonuna `/v1` eklenir (`.../v1`); Gemini uyumlu kullanımda adres olduğu gibi.
+
+`100.102.156.33`, **VPS'in** özel (Tailscale) adresidir; senin bilgisayarının değil. Hub genel
+internete kapalıdır. Bu adrese yalnız senin Tailscale ağındaki makinelerin ulaşır.
+
+### Yeni bir makineyi (sunucu, laptop) bağlamak: bir kerelik
+
+1. O makineye Tailscale kur ve kendi Tailscale hesabınla giriş yap (ücretsiz): <https://tailscale.com/download>
+2. Makinenin Tailscale adresini öğren (`tailscale ip -4`, 100.x.y.z).
+3. VPS'te izin ver (API + yönetim sayfası):
+   ```bash
+   ssh miraz-vps gemini-hub-allow 100.x.y.z "laptop"
+   ```
+4. O makinede çalışacak uygulamalar için anahtarı bu adresle üret (aşağıda).
+
+Docker içindeki uygulama için compose'a şunu ekle (n8n'de zaten var):
 ```yaml
 extra_hosts:
   - "host.docker.internal:host-gateway"
 ```
 
-Hub genel internete kapalıdır; bu adresler yalnız VPS içinden ve Tailscale'den çalışır.
+## 2. Yönetim sayfası ve anahtar üretme
 
-## 2. Anahtar üretme (her uygulamaya ayrı)
+- Tailscale'li herhangi bir cihazından: **`http://100.102.156.33:18091`**. Tarayıcı oturumu 30 gün açık kalır.
+- İlk girişte yönetici anahtarı sorulur. Anahtarı bir kez alıp parola yöneticine kaydet:
+  ```bash
+  ssh miraz-vps cat /etc/gemini-hub/admin-token
+  ```
+  Ya da tek kullanımlık giriş bağlantısı al (10 dk geçerli):
+  ```bash
+  ssh miraz-vps gemini-hub-login
+  ```
+  `100.102.156.33` ile başlayan satırı aç.
+- **Uygulamalar** → ad + **kaynak adres** + (isteğe bağlı) model listesi ve günlük sınır → **Anahtar üret**.
+  Anahtar yalnız o an gösterilir; bir kenara kaydet.
 
-1. Tünel aç (açık kalsın):
-   ```bash
-   ssh -N -L 18091:127.0.0.1:18091 miraz-vps
-   ```
-2. Tarayıcıda `http://127.0.0.1:18091/` (oturum düştüyse `ssh miraz-vps gemini-hub-login` tek kullanımlık bağlantı verir).
-3. **Uygulamalar** → ad + **kaynak adres** + (isteğe bağlı) model listesi ve günlük sınır → **Anahtar üret**.
-   Anahtar yalnız o an gösterilir; bir kenara kaydet.
-
-Kaynak adres, anahtarın **hangi makineden** çalışacağıdır (sızan anahtar başka yerde işe yaramaz):
+Kaynak adres, anahtarın **hangi makineden** çalışacağıdır. Bu yüzden sızan bir anahtar başka yerde işe yaramaz.
 
 | Uygulama | Kaynak adres |
 |---|---|
 | n8n (VPS, `newsroom-v2_default` ağı) | `172.19.0.0/16` |
 | VPS'teki başka bir Docker ağı | o ağın alt ağı (`docker network inspect <ağ>` → Subnet) |
-| Senin bilgisayarın | `100.119.199.122` |
-| Başka sunucu | onun Tailscale IP'si |
+| Tailscale'li bir makine | o makinenin 100.x adresi (birden fazlaysa virgülle) |
 
 ## 3. Model adları
 
@@ -108,6 +127,7 @@ her hesabın `five_hour_pct`, `weekly_pct`, sıfırlanma saatleri, `available` v
 ### Python — OpenAI SDK
 ```python
 from openai import OpenAI
+# VPS içindeki uygulama: http://127.0.0.1:18090/v1 ya da Docker'da http://host.docker.internal:18090/v1
 client = OpenAI(base_url="http://100.102.156.33:18090/v1", api_key="ghk_...", timeout=None)
 r = client.chat.completions.create(
     model="gemini-3.8-flash",

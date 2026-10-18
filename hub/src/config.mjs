@@ -25,7 +25,13 @@ export function loadConfig(env = process.env) {
     // (tailscale not up yet, docker bridge not created yet) is retried.
     apiListen: list(env.HUB_API_LISTEN, '127.0.0.1:18090'),
     // Admin listener: loopback only, enforced in code (any other host is refused).
-    adminListen: env.HUB_ADMIN_LISTEN || '127.0.0.1:18091',
+    // Public ingress: loopback only; the host's Caddy terminates TLS for HUB_PUBLIC_URL and
+    // forwards here. Requests must carry an app's secret path (/p/<secret>/...) and its key.
+    publicListen: env.HUB_PUBLIC_LISTEN || '',
+    publicUrl: (env.HUB_PUBLIC_URL || '').replace(/\/+$/, ''),
+    // Admin listeners: loopback and, optionally, the tailnet address. Never a public one:
+    // only loopback and tailnet (100.64.0.0/10) addresses are accepted, enforced in admin.mjs.
+    adminListen: list(env.HUB_ADMIN_LISTEN, '127.0.0.1:18091'),
     // Network allowlist checked on every connection before anything else.
     allowCidrs: list(env.HUB_ALLOW_CIDRS, '127.0.0.0/8,100.64.0.0/10,172.16.0.0/12'),
     // Gemini usage meter stop lines (percent used): the account rests until the window resets.

@@ -1,7 +1,7 @@
-// Admin side: loopback only (reach it with `ssh -L 18091:127.0.0.1:18091 miraz-vps`).
-// - refuses any non-loopback peer and any Host header other than 127.0.0.1/localhost
-//   (no DNS rebinding), needs the admin token, then a session cookie (HttpOnly,
-//   SameSite=Strict) plus a CSRF header on every change;
+// Admin side: loopback and the tailnet address only (HUB_ADMIN_LISTEN), never public.
+// - refuses any peer that is not loopback or a tailnet device and any Host header other
+//   than the listen addresses (no DNS rebinding), needs the admin token or a single-use
+//   link, then a session cookie (HttpOnly, SameSite=Strict) plus a CSRF header on every change;
 // - the sign-in view is noVNC over a WebSocket that is proxied only to the VNC
 //   server of the account being signed in, only for a logged-in admin session.
 
@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { WebSocketServer } from 'ws';
-import { normalizeIp, randomToken, sha256, timingSafeEqualStr, parseCidr } from './security.mjs';
+import { ipInCidrs, normalizeIp, randomToken, sha256, timingSafeEqualStr, parseCidr } from './security.mjs';
 import { HubError } from './scheduler.mjs';
 import { ADMIN_HTML, VIEWER_HTML } from './admin-ui.mjs';
 
@@ -24,14 +24,23 @@ function isLoopback(ip) {
   return ip === '127.0.0.1' || ip === '::1';
 }
 
+const TAILNET = [parseCidr('100.64.0.0/10')];
+/** Admin side: loopback or a tailnet device (WireGuard-authenticated), never anything else. */
+function isPrivateAdminPeer(ip) {
+  return isLoopback(ip) || ipInCidrs(ip, TAILNET);
+}
+
 export class AdminServer {
   constructor({ config, store, scheduler, log }) {
     Object.assign(this, { config, store, scheduler, log });
-    const i = config.adminListen.lastIndexOf(':');
-    this.host = config.adminListen.slice(0, i);
-    this.port = Number(config.adminListen.slice(i + 1));
-    if (!isLoopback(this.host)) throw new Error('HUB_ADMIN_LISTEN must be a loopback address');
-    this.hosts = new Set([`127.0.0.1:${this.port}`, `localhost:${this.port}`]);
+    this.listen = config.adminListen.map((addr) => {
+      const i = addr.lastIndexOf(':');
+      const host = addr.slice(0, i);
+      if (!isPrivateAdminPeer(host)) throw new Error(`admin address ${addr} is neither loopback nor tailnet`);
+      return { addr, host, port: Number(addr.slice(i + 1)) };
+    });
+    // Host headers this page answers to (anti DNS rebinding).
+    this.hosts = new Set(this.listen.flatMap(({ host, port }) => (isLoopback(host) ? [`127.0.0.1:${port}`, `localhost:${port}`] : [`${host}:${port}`])));
     this.failures = 0;
   }
 
@@ -44,15 +53,29 @@ export class AdminServer {
     );
     this.wss = new WebSocketServer({ noServer: true });
     this.server.on('upgrade', (req, sock, head) => this.#upgrade(req, sock, head));
-    this.server.listen(this.port, this.host, () => this.log('admin_listening', { addr: this.config.adminListen }));
+    this.servers = [this.server];
+    const handler = this.server.listeners('request')[0];
+    for (const [n, l] of this.listen.entries()) {
+      const srv = n === 0 ? this.server : http.createServer(handler);
+      if (n > 0) {
+        srv.on('upgrade', (req, sock, head) => this.#upgrade(req, sock, head));
+        this.servers.push(srv);
+      }
+      // The tailnet address may not exist yet at boot: retry until it does.
+      srv.on('error', (e) => {
+        this.log('admin_listen_retry', { addr: l.addr, error: e.code || e.message });
+        setTimeout(() => srv.listen(l.port, l.host), 30_000);
+      });
+      srv.listen(l.port, l.host, () => this.log('admin_listening', { addr: l.addr }));
+    }
   }
 
   stop() {
-    return new Promise((r) => this.server.close(r));
+    return Promise.all(this.servers.map((s) => new Promise((r) => s.close(r))));
   }
 
   #guard(req) {
-    return isLoopback(normalizeIp(req.socket.remoteAddress)) && this.hosts.has(String(req.headers.host ?? '').toLowerCase());
+    return isPrivateAdminPeer(normalizeIp(req.socket.remoteAddress)) && this.hosts.has(String(req.headers.host ?? '').toLowerCase());
   }
 
   #session(req) {
@@ -73,7 +96,7 @@ export class AdminServer {
     res.writeHead(200, {
       'content-type': 'text/html; charset=utf-8',
       'cache-control': 'no-store',
-      'content-security-policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://127.0.0.1:* ws://localhost:*; img-src 'self' data:; frame-ancestors 'none'",
+      'content-security-policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'",
       'x-frame-options': 'DENY',
       'referrer-policy': 'no-referrer',
     });
@@ -225,7 +248,7 @@ export class AdminServer {
         usage: a.usage,
       };
     });
-    const apps = this.store.apps().map(({ key_hash, ...rest }) => rest);
+    const apps = this.store.apps().map(({ key_hash, path_hash, ...rest }) => ({ ...rest, public: Boolean(path_hash) }));
     return {
       csrf: s.csrf,
       now: Date.now(),
@@ -272,16 +295,35 @@ export class AdminServer {
     const name = String(body.name ?? '').trim();
     if (!/^[\w.-]{2,40}$/.test(name)) throw new HubError(400, 'bad_name', 'name: 2-40 letters, digits, . _ -');
     const cidrs = String(body.cidrs ?? '').split(',').map((s) => s.trim()).filter(Boolean);
-    if (!cidrs.length) throw new HubError(400, 'bad_cidrs', 'at least one source address/CIDR is required');
+    const isPublic = body.public === true || body.public === 'true';
+    if (isPublic && !this.config.publicUrl) throw new HubError(400, 'no_public_url', 'the public link is not configured (HUB_PUBLIC_URL)');
+    if (!cidrs.length && !isPublic) throw new HubError(400, 'bad_cidrs', 'give a source address/CIDR, or tick the public link');
     for (const c of cidrs) parseCidr(c);
     const models = String(body.models ?? '*').trim() || '*';
     const cap = body.daily_cap === '' || body.daily_cap == null ? null : Number(body.daily_cap);
     if (cap !== null && !(Number.isInteger(cap) && cap > 0)) throw new HubError(400, 'bad_cap', 'daily_cap must be a positive integer');
     const key = randomToken('ghk_');
-    const app = { id: `app_${crypto.randomBytes(4).toString('hex')}`, name, key_hash: sha256(key), key_hint: `${key.slice(0, 8)}…${key.slice(-4)}`, cidrs: cidrs.join(','), models, daily_cap: cap, created_at: Date.now() };
+    const secret = isPublic ? randomToken('', 24) : null;
+    const app = {
+      id: `app_${crypto.randomBytes(4).toString('hex')}`,
+      name,
+      key_hash: sha256(key),
+      key_hint: `${key.slice(0, 8)}…${key.slice(-4)}`,
+      cidrs: cidrs.join(','),
+      models,
+      daily_cap: cap,
+      created_at: Date.now(),
+      path_hash: secret ? sha256(secret) : null,
+    };
     this.store.insertApp(app);
-    this.store.event('info', 'app_created', null, { app: app.id, name, cidrs: app.cidrs });
-    return { id: app.id, name, key, note: 'The key is shown only now. It works only from the listed source addresses.' };
+    this.store.event('info', 'app_created', null, { app: app.id, name, cidrs: app.cidrs, public: isPublic });
+    const out = { id: app.id, name, key, note: 'The key (and the link) are shown only now.' };
+    if (secret) {
+      out.openai_base_url = `${this.config.publicUrl}/p/${secret}/v1`;
+      out.gemini_base_url = `${this.config.publicUrl}/p/${secret}`;
+    }
+    if (cidrs.length) out.private_sources = app.cidrs;
+    return out;
   }
 
   #appAction(id, action, body) {

@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS apps (
   cidrs TEXT NOT NULL,                    -- comma list; the key only works from these
   models TEXT NOT NULL DEFAULT '*',       -- comma list of model ids or *
   daily_cap INTEGER,                      -- requests per rolling 24 h, NULL = no cap
+  path_hash TEXT,                         -- SHA-256 of the secret path for the public link, NULL = no public use
   created_at INTEGER NOT NULL,
   revoked_at INTEGER
 );
@@ -83,6 +84,8 @@ export class Store {
     // Migrations for databases created by earlier versions.
     const cols = this.db.prepare('PRAGMA table_info(accounts)').all().map((c) => c.name);
     if (!cols.includes('usage')) this.db.exec("ALTER TABLE accounts ADD COLUMN usage TEXT NOT NULL DEFAULT '{}'");
+    const appCols = this.db.prepare('PRAGMA table_info(apps)').all().map((c) => c.name);
+    if (!appCols.includes('path_hash')) this.db.exec('ALTER TABLE apps ADD COLUMN path_hash TEXT');
     if (!cols.includes('cooldown_until')) this.db.exec('ALTER TABLE accounts ADD COLUMN cooldown_until INTEGER NOT NULL DEFAULT 0');
     if (file !== ':memory:') fs.chmodSync(file, 0o600);
   }
@@ -134,8 +137,8 @@ export class Store {
   }
   insertApp(a) {
     this.q(
-      'INSERT INTO apps (id, name, key_hash, key_hint, cidrs, models, daily_cap, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-    ).run(a.id, a.name, a.key_hash, a.key_hint, a.cidrs, a.models, a.daily_cap ?? null, a.created_at);
+      'INSERT INTO apps (id, name, key_hash, key_hint, cidrs, models, daily_cap, created_at, path_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    ).run(a.id, a.name, a.key_hash, a.key_hint, a.cidrs, a.models, a.daily_cap ?? null, a.created_at, a.path_hash ?? null);
   }
   updateApp(id, fields) {
     const cols = Object.keys(fields);

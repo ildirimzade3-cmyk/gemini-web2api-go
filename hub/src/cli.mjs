@@ -26,12 +26,13 @@ if (cmd === 'admin-token') {
   writeSecret(args[0], token);
   console.log(`admin token written to ${args[0]} (restart not needed; old token invalid)`);
 } else if (cmd === 'login-link') {
-  // Prints a single-use admin login link (10 minutes). The link only works through the SSH tunnel.
+  // Prints a single-use admin login link (10 minutes), usable once from any admin address.
   const code = crypto.randomBytes(24).toString('base64url');
   const codes = store.get('login_codes', []).filter((c) => c.exp > Date.now());
   codes.push({ h: sha256(code), exp: Date.now() + 10 * 60_000 });
   store.set('login_codes', codes);
-  console.log(`http://127.0.0.1:18091/#otc=${code}`);
+  // One line per admin address (loopback through an SSH tunnel, the tailnet address directly).
+  for (const addr of loadConfig().adminListen) console.log(`http://${addr}/#otc=${code}`);
 } else if (cmd === 'app-add') {
   const [name, cidrs, models = '*', cap = '', keyfile] = args.length === 3 ? [args[0], args[1], '*', '', args[2]] : args;
   cidrs.split(',').forEach(parseCidr);

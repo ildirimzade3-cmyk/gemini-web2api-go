@@ -1,11 +1,11 @@
 #!/bin/sh
-# Lets one more machine of the tailnet reach the hub API (port 18090) through ufw.
-# Usage: gemini-hub-allow <tailscale-ip> [comment]     (removal: ufw delete allow ...)
-# The app key for that machine must also list the address (keys are source-bound).
+# Lets one more of your tailnet machines reach the hub: API (18090) and admin page (18091).
+# Usage: gemini-hub-allow <tailscale-ip> [comment]     (removal: ufw status numbered; ufw delete N)
+# An app key used from that machine must also list the address (keys are source-bound).
 set -eu
 ip="$1"; comment="${2:-gemini-hub client}"
 case "$ip" in 100.*) ;; *) echo "expected a tailnet 100.x address" >&2; exit 2;; esac
 # Insert above the "deny everything else on tailscale0" rule.
 pos=$(ufw status numbered | awk '/on tailscale0/ && /DENY IN/ {match($0,/\[ *[0-9]+\]/); s=substr($0,RSTART,RLENGTH); gsub(/[^0-9]/,"",s); print s; exit}')
-ufw insert "${pos:-1}" allow in on tailscale0 from "$ip" to any port 18090 proto tcp comment "$comment"
-ufw status numbered | grep 18090
+ufw insert "${pos:-1}" allow in on tailscale0 from "$ip" to any port 18090,18091 proto tcp comment "$comment"
+ufw status numbered | grep -E "1809[01]"

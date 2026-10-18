@@ -98,15 +98,24 @@ export class AuthThrottle {
   }
 }
 
-/** Authenticates an API request. Returns { app } or { error, status }. Same message for every failure. */
-export function authenticate(store, req, url, ip) {
+/**
+ * Authenticates an API request. Returns { app } or { error, status }; the same
+ * message for every failure. Two factors always: the key plus either the source
+ * network the key is bound to (private listeners) or the app's secret path in the
+ * URL (public link, `pathSecret`).
+ */
+export function authenticate(store, req, url, ip, { pathSecret = null } = {}) {
   const key = extractKey(req, url);
   const fail = { status: 401, error: 'invalid key or source' };
   if (!key || key.length > 200) return { ...fail, reason: 'no_key' };
   const app = store.appByHash(sha256(key));
   if (!app) return { ...fail, reason: 'unknown_key' };
+  if (pathSecret !== null) {
+    if (!app.path_hash || !timingSafeEqualStr(sha256(pathSecret), app.path_hash)) return { ...fail, reason: 'path_mismatch', app_id: app.id };
+    return { app };
+  }
   const cidrs = app.cidrs.split(',').map((s) => s.trim()).filter(Boolean);
-  if (!ipInCidrs(ip, cidrs)) return { ...fail, reason: 'source_not_bound', app_id: app.id };
+  if (!cidrs.length || !ipInCidrs(ip, cidrs)) return { ...fail, reason: 'source_not_bound', app_id: app.id };
   return { app };
 }
 

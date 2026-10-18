@@ -80,14 +80,15 @@ export class ApiServer {
 
   async start() {
     for (const addr of this.config.apiListen) this.#listen(addr);
+    if (this.config.publicListen) this.#listen(this.config.publicListen, { public: true });
   }
 
-  #listen(addr) {
+  #listen(addr, { public: isPublic = false } = {}) {
     const i = addr.lastIndexOf(':');
     const host = addr.slice(0, i).replace(/^\[|\]$/g, '');
     const port = Number(addr.slice(i + 1));
     const server = http.createServer({ requestTimeout: 0, headersTimeout: 30_000, keepAliveTimeout: 65_000 }, (req, res) =>
-      this.#handle(req, res).catch((e) => {
+      this.#handle(req, res, isPublic).catch((e) => {
         this.log('api_error', { error: e.message });
         send(res, 500, errorBody('openai', 500, 'internal', 'internal error'));
       }),
@@ -108,9 +109,21 @@ export class ApiServer {
     await Promise.all(this.servers.map((s) => new Promise((r) => s.close(r))));
   }
 
-  async #handle(req, res) {
-    const ip = normalizeIp(req.socket.remoteAddress);
-    const url = new URL(req.url, 'http://hub');
+  async #handle(req, res, isPublic = false) {
+    let ip = normalizeIp(req.socket.remoteAddress);
+    let url = new URL(req.url, 'http://hub');
+    let pathSecret = null;
+    if (isPublic) {
+      // Only the host's Caddy reaches this loopback listener; it sets X-Forwarded-For.
+      ip = normalizeIp(String(req.headers['x-forwarded-for'] ?? ip).split(',')[0].trim());
+      const m = /^\/p\/([A-Za-z0-9]{20,64})(\/.*)$/.exec(url.pathname);
+      if (!m) {
+        this.throttle.fail(ip);
+        return send(res, 404, { error: { message: 'not found' } });
+      }
+      pathSecret = m[1];
+      url = new URL(m[2] + url.search, 'http://hub');
+    }
     const flavor = url.pathname.startsWith('/v1beta') ? 'gemini' : 'openai';
     const fail = (status, code, message, headers) => send(res, status, errorBody(flavor, status, code, message), headers);
 
@@ -118,7 +131,7 @@ export class ApiServer {
     // A valid key from its bound source always works; a source that keeps sending
     // bad keys only has its failures refused faster (keys are 256-bit, so guessing
     // is hopeless anyway; the block is about noise, not about locking out real apps).
-    const auth = authenticate(this.store, req, url, ip);
+    const auth = authenticate(this.store, req, url, ip, { pathSecret });
     if (!auth.app && this.throttle.blocked(ip)) return fail(429, 'blocked', 'too many failed authentications', { 'retry-after': '1800' });
     if (!auth.app) {
       this.throttle.fail(ip);
