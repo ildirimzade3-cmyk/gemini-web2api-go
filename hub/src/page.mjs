@@ -48,7 +48,8 @@ export function collectModelMenu() {
   return Array.from(document.querySelectorAll('[data-test-id^="bard-mode-option-"]')).map((el) => ({
     id: el.getAttribute('data-mode-id') || '',
     text: (el.innerText || el.textContent || '').trim(),
-    enabled: el.getAttribute('aria-disabled') !== 'true',
+    // Free accounts list paid models as "upsell" items: clicking opens an Upgrade dialog, not the model.
+    enabled: el.getAttribute('aria-disabled') !== 'true' && !/upsell/i.test(el.getAttribute('data-test-id') || ''),
     selected:
       el.getAttribute('data-active') === 'true' ||
       el.getAttribute('aria-checked') === 'true' ||

@@ -186,7 +186,7 @@ export class Scheduler {
     for (const a of this.store.accounts()) {
       if (!includeAll && a.state !== 'ready') continue;
       for (const m of a.models) {
-        if (!m.id) continue;
+        if (!m.id || m.enabled === false) continue;
         const e = (out[m.id] ??= { id: m.id, label: m.label, class: modelClass(m.label), accounts: [] });
         e.accounts.push(a.id);
       }
