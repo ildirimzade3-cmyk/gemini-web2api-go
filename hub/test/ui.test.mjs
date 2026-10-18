@@ -107,3 +107,11 @@ test('SelectorBook does not share state with the object it was built from', () =
   assert.deepEqual(seed, { input: ['x'] });
   assert.deepEqual(book.list('input').slice(0, 2), ['y', 'x']);
 });
+
+test('stripThinking removes the thinking level the model button appends', async () => {
+  const { stripThinking, labelsMatch } = await import('../src/ui.mjs');
+  assert.equal(stripThinking('Flash High'), 'Flash');
+  assert.equal(stripThinking('Pro medium'), 'Pro');
+  assert.equal(stripThinking('3.1 Pro'), '3.1 Pro');
+  assert.ok(labelsMatch(stripThinking('Flash High'), '3.8 Flash'));
+});

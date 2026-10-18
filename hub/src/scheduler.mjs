@@ -390,6 +390,12 @@ export class Scheduler {
     for (let i = 0; order.length < this.queue.length; i++) for (const list of lists) if (list[i]) order.push(list[i]);
     for (const job of order) {
       const account = this.#pick(job, now);
+      if (!account && job.model.accounts.every((id) => job.tried.has(id))) {
+        // Every account that offers the model was tried and none could take it (nothing was sent).
+        this.#dequeue(job);
+        job.reject(new HubError(503, 'no_account', `every account offering ${job.model.label} was tried and none could take the request now; nothing was sent`, { retryAfter: 60 }));
+        continue;
+      }
       if (!account) {
         const verdict = this.#couldServe(job.model, now);
         if (!verdict.ok) {
@@ -665,8 +671,10 @@ export class Scheduler {
         this.refreshAccount(id).catch(() => {});
         return requeue();
       case 'model_changed':
-        this.store.setLimit(id, job.model.id, { exhausted_until: now + HOUR });
-        this.store.event('warn', 'model_changed', id, { model: job.model.id, message: err.message });
+        // After an answer it usually means Google moved the chat to another model (a limit):
+        // that model rests 15 min on the account. Before sending, nothing is blocked.
+        if (sent) this.store.setLimit(id, job.model.id, { exhausted_until: now + 15 * 60_000 });
+        this.store.event('warn', 'model_changed', id, { model: job.model.id, sent, message: err.message });
         return sent ? fail(502, 'model_changed', `Gemini did not answer with ${job.model.label}; the answer was discarded`) : requeue();
       case 'ui_changed': {
         const diag = await rt.gpage?.diagnostic();

@@ -274,7 +274,9 @@ export class GeminiPage {
     const picker = await this.#first('picker', { timeout: 3000 });
     if (!picker) return '';
     const aria = (await picker.el.getAttribute('aria-label').catch(() => '')) || '';
-    return /currently\s+(.+)$/i.exec(aria.trim())?.[1]?.trim() ?? norm(await picker.el.innerText().catch(() => ''));
+    const shown = /currently\s+(.+)$/i.exec(aria.trim())?.[1]?.trim() ?? norm(await picker.el.innerText().catch(() => ''));
+    // With a thinking level set the button reads "Flash High"; the level is checked on its own.
+    return stripThinking(shown);
   }
 
   /** Picks the model with exactly this label and confirms the picker shows it. */
@@ -604,6 +606,11 @@ export class GeminiPage {
       return null;
     }
   }
+}
+
+/** "Flash High" -> "Flash": the thinking level the model button appends to the model name. */
+export function stripThinking(shown) {
+  return norm(shown).replace(/\s+(low|medium|high)$/i, '');
 }
 
 export function labelsMatch(shown, label) {

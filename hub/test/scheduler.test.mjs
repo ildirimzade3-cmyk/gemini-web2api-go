@@ -357,7 +357,8 @@ test('picker showing another model BEFORE send -> nothing sent on that account',
 
 test('picker showing another model before send, single account -> fails, nothing sent', async (t) => {
   const h = harness(t, { hooks: { a1: { currentModel: () => 'Flash' } } });
-  await assert.rejects(h.scheduler.submit(h.req()), (e) => e instanceof HubError && e.status === 429);
+  await assert.rejects(h.scheduler.submit(h.req()), (e) => e instanceof HubError && e.status === 503 && e.code === 'no_account');
+  assert.equal(h.store.limit('a1', MODEL_ID)?.exhausted_until ?? 0, 0, 'nothing blocked before a send');
   assert.equal(h.pages.a1.sends, 0);
 });
 
