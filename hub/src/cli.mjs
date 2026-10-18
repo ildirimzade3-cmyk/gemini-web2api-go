@@ -1,6 +1,7 @@
 // Operator CLI, run inside the container:
 //   docker exec gemini-hub node src/cli.mjs admin-token <file>     new admin token, written to <file> (0600)
 //   docker exec gemini-hub node src/cli.mjs app-add <name> <cidrs> [models] [daily_cap] <keyfile>
+//   docker exec gemini-hub node src/cli.mjs login-link                single-use admin login link (10 min)
 //   docker exec gemini-hub node src/cli.mjs status
 // Secrets are written to files, never printed.
 
@@ -24,6 +25,13 @@ if (cmd === 'admin-token') {
   store.event('warn', 'admin_token_rotated', null, {});
   writeSecret(args[0], token);
   console.log(`admin token written to ${args[0]} (restart not needed; old token invalid)`);
+} else if (cmd === 'login-link') {
+  // Prints a single-use admin login link (10 minutes). The link only works through the SSH tunnel.
+  const code = crypto.randomBytes(24).toString('base64url');
+  const codes = store.get('login_codes', []).filter((c) => c.exp > Date.now());
+  codes.push({ h: sha256(code), exp: Date.now() + 10 * 60_000 });
+  store.set('login_codes', codes);
+  console.log(`http://127.0.0.1:18091/#otc=${code}`);
 } else if (cmd === 'app-add') {
   const [name, cidrs, models = '*', cap = '', keyfile] = args.length === 3 ? [args[0], args[1], '*', '', args[2]] : args;
   cidrs.split(',').forEach(parseCidr);

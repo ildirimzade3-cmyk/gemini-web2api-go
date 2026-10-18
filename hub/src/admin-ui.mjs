@@ -25,7 +25,7 @@ export const ADMIN_HTML = `<!doctype html><html lang="tr"><head><meta charset="u
 <header><h1>Gemini Hub</h1><span id="summary" class="mute"></span><span style="flex:1"></span><button id="logout" hidden>Çıkış</button></header>
 <main>
 <section id="login"><h2>Giriş</h2><div class="row"><input id="token" type="password" placeholder="Yönetici anahtarı" size="50" autocomplete="off"><button class="primary" id="go">Gir</button></div>
-<p><small>Bu sayfa yalnız VPS'in loopback adresinde açılır: <code>ssh -L 18091:127.0.0.1:18091 miraz-vps</code></small></p></section>
+<p><small>Bu sayfa yalnız VPS'in loopback adresinde açılır: <code>ssh -L 18091:127.0.0.1:18091 miraz-vps</code>. Tek kullanımlık giriş bağlantısı: <code>ssh miraz-vps gemini-hub-login</code></small></p></section>
 <div id="app" hidden style="display:grid;gap:16px">
 <section><h2>Hesaplar</h2><div class="row" style="margin-bottom:10px"><input id="newlabel" placeholder="Hesap adı (ör. İş hesabı)"><button class="primary" id="add">Hesap ekle</button>
 <small>Ekledikten sonra “Giriş yap”: hub'ın kendi tarayıcısı açılır, Google'a bir kez girersiniz.</small></div><div id="accounts" class="grid"></div></section>
@@ -75,7 +75,9 @@ function render(s){csrf=s.csrf;
  $('#events').innerHTML='<table>'+s.events.slice(0,80).map(e=>'<tr><td class=mono>'+t(e.ts)+'</td><td class="'+(e.level==='alert'?'bad':e.level==='warn'?'warn':'mute')+'">'+esc(e.kind)+'</td><td>'+esc(e.account_id||'')+'</td><td class=mono>'+esc(JSON.stringify(e.detail)).slice(0,300)+'</td></tr>').join('')+'</table>'}
 async function refresh(){try{render(await api('/api/state'))}catch(e){}}
 setInterval(()=>{if(!$('#app').hidden)refresh()},5000);
-fetch('/api/state').then(r=>r.ok?r.json():null).then(s=>{if(s){show(true);render(s)}});
+const otc=new URLSearchParams(location.hash.slice(1)).get('otc');history.replaceState(null,'','/');
+if(otc){fetch('/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({otc})}).then(async r=>{const j=await r.json();if(!r.ok)return alert('Giriş bağlantısı geçersiz ya da kullanılmış: '+j.error);csrf=j.csrf;show(true);refresh()})}
+else fetch('/api/state').then(r=>r.ok?r.json():null).then(s=>{if(s){show(true);render(s)}});
 </script></body></html>`;
 
 export const VIEWER_HTML = `<!doctype html><html lang="tr"><head><meta charset="utf-8"><title>Gemini Hub — giriş</title><style>${STYLE}

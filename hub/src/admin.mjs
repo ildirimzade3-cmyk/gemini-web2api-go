@@ -131,7 +131,8 @@ export class AdminServer {
     const body = await this.#body(req).catch(() => ({}));
     const hash = this.store.get('admin_token_hash');
     if (this.failures >= 20) return this.#json(res, 429, { error: 'too many attempts; restart the hub to reset' });
-    if (!hash || typeof body.token !== 'string' || !timingSafeEqualStr(sha256(body.token), hash)) {
+    if (typeof body.otc === 'string' && this.#useLoginCode(body.otc)) body.token = null;
+    else if (!hash || typeof body.token !== 'string' || !timingSafeEqualStr(sha256(body.token), hash)) {
       this.failures += 1;
       this.store.event('warn', 'admin_login_failed', null, {});
       await new Promise((r) => setTimeout(r, 800));
@@ -144,6 +145,15 @@ export class AdminServer {
     this.sessions.set(key, { key, csrf, exp: Date.now() + SESSION_MS });
     this.store.event('info', 'admin_login', null, {});
     return this.#json(res, 200, { csrf }, { 'set-cookie': `hub_admin=${raw}; Path=/; Max-Age=${SESSION_MS / 1000}; HttpOnly; SameSite=Strict` });
+  }
+
+  /** One-time login codes from `cli.mjs login-link`: single use, 10 minutes. */
+  #useLoginCode(code) {
+    const codes = this.store.get('login_codes', []);
+    const h = sha256(code);
+    const hit = codes.find((c) => c.h === h && c.exp > Date.now());
+    this.store.set('login_codes', codes.filter((c) => c.h !== h && c.exp > Date.now()));
+    return Boolean(hit);
   }
 
   #static(res, rel) {

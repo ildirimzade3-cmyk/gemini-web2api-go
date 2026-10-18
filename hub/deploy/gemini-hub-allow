@@ -6,6 +6,6 @@ set -eu
 ip="$1"; comment="${2:-gemini-hub client}"
 case "$ip" in 100.*) ;; *) echo "expected a tailnet 100.x address" >&2; exit 2;; esac
 # Insert above the "deny everything else on tailscale0" rule.
-pos=$(ufw status numbered | awk '/on tailscale0/ && /DENY IN/ {gsub(/[^0-9]/,"",$1); print $1; exit}')
+pos=$(ufw status numbered | awk '/on tailscale0/ && /DENY IN/ {match($0,/\[ *[0-9]+\]/); s=substr($0,RSTART,RLENGTH); gsub(/[^0-9]/,"",s); print s; exit}')
 ufw insert "${pos:-1}" allow in on tailscale0 from "$ip" to any port 18090 proto tcp comment "$comment"
 ufw status numbered | grep 18090

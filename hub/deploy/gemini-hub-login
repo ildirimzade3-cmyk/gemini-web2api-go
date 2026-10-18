@@ -1,0 +1,4 @@
+#!/bin/sh
+# Prints a single-use admin login link (valid 10 minutes). Open it in a browser while
+# the tunnel runs:  ssh -N -L 18091:127.0.0.1:18091 miraz-vps
+exec docker exec gemini-hub node src/cli.mjs login-link
