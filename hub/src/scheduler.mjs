@@ -320,8 +320,11 @@ export class Scheduler {
     if (req.app.daily_cap != null && this.store.appRequestsSince(req.app.id, now - DAY) >= req.app.daily_cap) {
       return reject(429, 'app_cap', `this app used its ${req.app.daily_cap} requests for the last 24 h`, { retryAfter: 3600 });
     }
-    if (this.queue.filter((j) => j.app.id === req.app.id).length >= 50) {
-      return reject(429, 'queue_full', 'this app already has 50 requests waiting', { retryAfter: 60 });
+    if (this.queue.length >= this.config.maxQueue) {
+      const est = this.estimateWaitMs(model, this.queue.length + 1, now);
+      return reject(429, 'queue_full', `the queue is full (${this.queue.length} requests waiting); estimated wait for a new one about ${Math.ceil(est / 1000)} s — try again later`, {
+        retryAfter: Math.max(5, Math.ceil(est / 1000)),
+      });
     }
     const verdict = this.#couldServe(model, now);
     if (!verdict.ok) {
@@ -401,6 +404,22 @@ export class Scheduler {
   #dequeue(job) {
     const i = this.queue.indexOf(job);
     if (i >= 0) this.queue.splice(i, 1);
+  }
+
+  /**
+   * Rough wait for the n-th request in line for `model`: how long its recent jobs
+   * took (median of the last 20 successful ones, 30 s when unknown) times the
+   * rounds needed over the accounts that can take it now.
+   */
+  estimateWaitMs(model, position, now = Date.now()) {
+    const rows = this.store
+      .q("SELECT ms FROM usage WHERE model = ? AND status = 'ok' ORDER BY id DESC LIMIT 20")
+      .all(model.id)
+      .map((r) => Number(r.ms))
+      .sort((a, b) => a - b);
+    const typical = rows.length ? rows[Math.floor(rows.length / 2)] + 5_000 : 30_000;
+    const accounts = this.store.accounts().filter((a) => model.accounts.includes(a.id) && !this.accountStatus(a, model, now).blockers.length).length;
+    return Math.ceil(position / Math.max(1, accounts)) * typical;
   }
 
   /** Best free account for the job (see the sort below). */
@@ -553,10 +572,23 @@ export class Scheduler {
       // During the rest a person might glance at the usage page: refresh the meter
       // when it is older than 30 minutes (no cost to the caller, who already has the answer).
       const acct = this.store.account(account.id);
-      if (prompts && acct?.state === 'ready' && Date.now() - (acct.usage?.read_at ?? 0) > 30 * 60_000) {
-        this.readUsage(account.id).catch((e) => this.log('usage_read_failed', { account: account.id, error: e.message }));
-      }
+      const stale = prompts && acct?.state === 'ready' && Date.now() - (acct.usage?.read_at ?? 0) > 30 * 60_000;
+      const after = stale ? this.readUsage(account.id).catch((e) => this.log('usage_read_failed', { account: account.id, error: e.message })) : Promise.resolve();
       this.#tick().catch(() => {});
+      // One request = one use of the browser: close it as soon as no waiting request needs this account.
+      after.finally(() => this.#closeIfIdle(account.id));
+    }
+  }
+
+  async #closeIfIdle(id) {
+    const rt = this.runtimes.get(id);
+    if (!rt?.warm || rt.busy || rt.signin) return;
+    if (this.queue.some((j) => j.model.accounts.includes(id) && !j.tried.has(id))) return;
+    rt.busy = true;
+    try {
+      await rt.close('done');
+    } finally {
+      rt.busy = false;
     }
   }
 

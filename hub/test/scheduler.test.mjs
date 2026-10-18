@@ -488,3 +488,36 @@ test('stop() rejects queued jobs and shuts runtimes down', async (t) => {
   assert.equal((await running).text, 't');
   assert.equal(h.pages.a1.inserts.length, 1);
 });
+
+test('the browser closes as soon as the request is done and nothing waits for that account', async (t) => {
+  const h = harness(t, { accounts: 1 });
+  await h.scheduler.submit(h.req());
+  await settle();
+  assert.equal(h.runtimes.a1.warm, false);
+  assert.deepEqual(h.runtimes.a1.closed, ['done']);
+});
+
+test('a full queue refuses at once with an estimated wait', async (t) => {
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const h = harness(t, {
+    accounts: 1,
+    configOverride: { maxQueue: 1 },
+    hooks: { a1: { waitAnswer: async () => { await gate; return { text: 'late', via: 'copy' }; } } },
+  });
+  const first = h.scheduler.submit(h.req({ dedupeKey: 'k1' }));
+  await settle();
+  const second = h.scheduler.submit(h.req({ dedupeKey: 'k2' }));
+  await settle();
+  assert.equal(h.scheduler.queue.length, 1);
+  await assert.rejects(h.scheduler.submit(h.req({ dedupeKey: 'k3' })), (e) => {
+    assert.equal(e.status, 429);
+    assert.equal(e.code, 'queue_full');
+    assert.match(e.message, /estimated wait/);
+    assert.ok(e.retryAfter >= 5);
+    return true;
+  });
+  release();
+  await first;
+  await second;
+});

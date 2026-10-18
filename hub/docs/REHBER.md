@@ -121,7 +121,11 @@ model ve hesaptan geldiği `x-hub-model-label` ve `x-hub-account` başlıkların
 - Cevap: `{{ $json.candidates[0].content.parts[0].text }}` (JSON metni; Code düğümünde `JSON.parse`).
 - Options → Timeout: 900000. Options → Response → "Never Error" açarsan 429/503'ü kendin dallandırırsın.
 
-### n8n'de "hepsi dolu" durumu
+### n8n'de "hepsi dolu" ve "sıra dolu" durumları
+
+Sırada en fazla **4 istek** bekler. Fazlası kuyruğa girmez; hemen `429 queue_full` döner ve
+mesajda tahmini bekleme süresi yazar (`Retry-After` başlığında saniye olarak).
+
 
 Hub, bu modeli sunan bütün hesaplar o an doluysa (Gemini kotası %95) ya da Google tarafından
 duraklatılmışsa **bekletmez**, hemen `429` döner:
@@ -192,6 +196,7 @@ curl https://hub.152-53-39-199.sslip.io/p/<gizli-yol>/v1/chat/completions -H "Au
 | 401 | anahtar yanlış ya da bu makineden geçersiz | anahtarı / kaynak adresi kontrol et |
 | 404 `model_not_found` | hiçbir hesap bu modeli sunmuyor | `GET /v1/models` |
 | 429 `capacity` | tüm uygun hesaplar dolu/duraklatılmış | `Retry-After` kadar bekle ya da başka modele geç |
+| 429 `queue_full` | sırada zaten 4 istek bekliyor; mesajda tahmini bekleme süresi | `Retry-After` kadar sonra tekrar dene |
 | 429 `account_limit` / `account_throttled` | Google cevap sırasında limit/429 verdi | tekrar gönderme; sonra dene |
 | 502 `model_changed` | Gemini başka modelle cevap verdi, cevap atıldı | tekrar dene |
 | 503 `no_account` | hesaplar giriş/onay bekliyor | yönetim sayfasına bak |

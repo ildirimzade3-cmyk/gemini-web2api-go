@@ -51,6 +51,8 @@ bir makinede tek bir sıradan Chrome görür.
 - Kullanım %95'e (5 saatlik ya da haftalık) ulaşınca hesap sıfırlanma saatine kadar iş almaz; okuma
   30 dakikadan eskiyse hesap kullanılmadan önce sayfa yeniden okunur (istem gönderip denemez).
 - Hesaplar paralel çalışır (hesap başına aynı anda bir istem, cevaplar arası 2–18 sn).
+- Sırada en fazla 4 istek bekler; fazlası hemen `429 queue_full` (tahmini bekleme süresiyle) alır.
+- Her istekten sonra, sırada o hesaba iş yoksa Chrome hemen kapanır (RAM boşalır).
 - Hiçbir hesap şu an alamıyorsa istek **beklemez**: hemen `429 capacity` (ya da `503 no_account`)
   döner; mesajda her hesabın durumu ve bir sonraki boşalma saati, `Retry-After` başlığında saniye olarak.
   Uygulamalar `GET /v1/hub/accounts` ile her hesabın yüzdesini, sıfırlanma saatini ve uygunluğunu görür.
