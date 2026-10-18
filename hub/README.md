@@ -14,6 +14,7 @@ bir makinede tek bir sıradan Chrome görür.
 | VPS'teki Docker uygulamaları | `http://172.17.0.1:18090` (`host.docker.internal:18090`, `extra_hosts: host.docker.internal:host-gateway`) |
 | Anahtar | `Authorization: Bearer ghk_…`, `x-goog-api-key` ya da `?key=` |
 
+**Adım adım rehber (n8n ve kendi uygulamaların): [docs/REHBER.md](docs/REHBER.md).**
 Örnekler: [`examples/openai_client.py`](examples/openai_client.py), [`examples/genai_client.py`](examples/genai_client.py).
 
 - Model adları hesaplardaki model seçiciden gelir: `gemini-3.8-flash`, `gemini-3.1-pro`,
