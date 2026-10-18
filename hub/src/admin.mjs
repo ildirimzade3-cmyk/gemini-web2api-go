@@ -258,6 +258,8 @@ export class AdminServer {
         await this.scheduler.runtimes.get(id)?.close('paused');
         return this.store.account(id);
       case 'resume':
+        // Back to work after the operator's pause; the check below demotes it again if signed out.
+        this.scheduler.setState(id, 'ready', 'resumed by the operator');
         return this.scheduler.refreshAccount(id);
       case 'remove':
         if (body.confirm !== id) throw new HubError(400, 'confirm', 'send {"confirm": "<account id>"} to remove');
