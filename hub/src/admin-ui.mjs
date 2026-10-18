@@ -3,7 +3,7 @@
 const STYLE = `
 :root{--bg:#f6f7f9;--card:#fff;--ink:#16181d;--mute:#5d6470;--line:#e2e5ea;--ok:#127a3a;--warn:#a15c00;--bad:#b3261e;--acc:#2456c7}
 @media (prefers-color-scheme:dark){:root{--bg:#121417;--card:#1b1e23;--ink:#e8eaee;--mute:#9aa1ac;--line:#2c3038;--ok:#4cc27a;--warn:#e0a24a;--bad:#f07167;--acc:#7aa2ff}}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,Segoe UI,Roboto,sans-serif}
+*{box-sizing:border-box}[hidden]{display:none!important}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,Segoe UI,Roboto,sans-serif}
 header{display:flex;gap:12px;align-items:center;padding:14px 20px;border-bottom:1px solid var(--line);background:var(--card);position:sticky;top:0}
 header h1{font-size:16px;margin:0}main{max-width:1200px;margin:0 auto;padding:16px 20px;display:grid;gap:16px}
 section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
@@ -24,7 +24,7 @@ export const ADMIN_HTML = `<!doctype html><html lang="tr"><head><meta charset="u
 <title>Gemini Hub</title><style>${STYLE}</style></head><body>
 <header><h1>Gemini Hub</h1><span id="summary" class="mute"></span><span style="flex:1"></span><button id="logout" hidden>Çıkış</button></header>
 <main>
-<section id="login"><h2>Giriş</h2><div class="row"><input id="token" type="password" placeholder="Yönetici anahtarı" size="50" autocomplete="off"><button class="primary" id="go">Gir</button></div>
+<section id="login"><h2>Giriş</h2><div class="row"><input id="token" type="password" placeholder="Yönetici anahtarı" size="50" autocomplete="off"><button class="primary" id="go">Gir</button></div><p id="loginmsg" class="bad"></p>
 <p><small>Bu sayfa yalnız VPS'in loopback adresinde açılır: <code>ssh -L 18091:127.0.0.1:18091 miraz-vps</code>. Tek kullanımlık giriş bağlantısı: <code>ssh miraz-vps gemini-hub-login</code></small></p></section>
 <div id="app" hidden style="display:grid;gap:16px">
 <section><h2>Hesaplar</h2><div class="row" style="margin-bottom:10px"><input id="newlabel" placeholder="Hesap adı (ör. İş hesabı)"><button class="primary" id="add">Hesap ekle</button>
@@ -79,9 +79,11 @@ function render(s){csrf=s.csrf;
  $('#events').innerHTML='<table>'+s.events.slice(0,80).map(e=>'<tr><td class=mono>'+t(e.ts)+'</td><td class="'+(e.level==='alert'?'bad':e.level==='warn'?'warn':'mute')+'">'+esc(e.kind)+'</td><td>'+esc(e.account_id||'')+'</td><td class=mono>'+esc(JSON.stringify(e.detail)).slice(0,300)+'</td></tr>').join('')+'</table>'}
 async function refresh(){try{render(await api('/api/state'))}catch(e){}}
 setInterval(()=>{if(!$('#app').hidden)refresh()},5000);
-const otc=new URLSearchParams(location.hash.slice(1)).get('otc');history.replaceState(null,'','/');
-if(otc){fetch('/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({otc})}).then(async r=>{const j=await r.json();if(!r.ok)return alert('Giriş bağlantısı geçersiz ya da kullanılmış: '+j.error);csrf=j.csrf;show(true);refresh()})}
-else fetch('/api/state').then(r=>r.ok?r.json():null).then(s=>{if(s){show(true);render(s)}});
+// A single-use link (#otc=...) logs in; it also works when opened in a tab that already shows this page.
+function useLink(){const otc=new URLSearchParams(location.hash.slice(1)).get('otc');if(!otc)return false;history.replaceState(null,'','/');
+ fetch('/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({otc})}).then(async r=>{const j=await r.json();if(!r.ok){$('#loginmsg').textContent='Giriş bağlantısı geçersiz ya da kullanılmış: '+j.error;return}csrf=j.csrf;show(true);refresh()});return true}
+window.addEventListener('hashchange',useLink);
+if(!useLink())fetch('/api/state').then(r=>r.ok?r.json():null).then(s=>{if(s){show(true);render(s)}else show(false)});
 </script></body></html>`;
 
 export const VIEWER_HTML = `<!doctype html><html lang="tr"><head><meta charset="utf-8"><title>Gemini Hub — giriş</title><style>${STYLE}
