@@ -9,10 +9,10 @@ bir makinede tek bir sıradan Chrome görür.
 
 | | |
 |---|---|
-| OpenAI uyumlu | `http://100.102.156.33:18090/v1` (`/chat/completions`, `/models`) |
-| Gemini uyumlu | `http://100.102.156.33:18090` (`/v1beta/models/{model}:generateContent`, `:streamGenerateContent`) |
-| VPS'teki Docker uygulamaları | `http://172.17.0.1:18090` (`host.docker.internal:18090`, `extra_hosts: host.docker.internal:host-gateway`) |
+| **Genel link (her yerden)** | `https://hub.152-53-39-199.sslip.io/p/<uygulamanın gizli yolu>/v1` (OpenAI) · sonunda `/v1` olmadan (Gemini) |
+| VPS içi (n8n vb.) | `http://host.docker.internal:18090/v1` · `http://127.0.0.1:18090/v1` |
 | Anahtar | `Authorization: Bearer ghk_…`, `x-goog-api-key` ya da `?key=` |
+| Yönetim | `http://100.102.156.33:18091` (Tailscale) ya da SSH tüneliyle `127.0.0.1:18091`; internete kapalı |
 
 **Adım adım rehber (n8n ve kendi uygulamaların): [docs/REHBER.md](docs/REHBER.md).**
 Örnekler: [`examples/openai_client.py`](examples/openai_client.py), [`examples/genai_client.py`](examples/genai_client.py).

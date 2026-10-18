@@ -3,33 +3,35 @@
 Hub, Gemini hesaplarını tek adreste toplar ve **resmî OpenAI ya da Gemini API'si gibi**
 konuşur. Uygulamanın tek bilmesi gereken: **adres + anahtar + model adı.**
 
-## 1. Bilgisayar gerekmez
+## 1. Bilgisayar gerekmez, kurulum gerekmez
 
 Hub **VPS'te 7/24 çalışan bir sunucu servisidir** (yeniden başlatmada kendiliğinden açılır).
-Bilgisayarın kapalı olsa da çalışır. Hesap tarayıcıları da, oturumlar da sunucuda durur.
+Bilgisayarın kapalı olsa da çalışır; hesap tarayıcıları ve oturumlar sunucuda durur.
 
-| Uygulama nerede | Adres | Bilgisayar gerekir mi |
+Her uygulama için yönetim sayfasında **"internetten (genel link)"** işaretli bir anahtar üretirsin.
+Hub sana iki şey verir:
+
+- **Link:** `https://hub.152-53-39-199.sslip.io/p/<gizli-yol>/v1` (OpenAI uyumlu) ve sonunda
+  `/v1` olmadan aynı link (Gemini uyumlu)
+- **Anahtar:** `ghk_…`
+
+Bu link **her yerden** çalışır: kendi bilgisayarın, laptop, telefon, başka bir sunucu, n8n.
+Tailscale, tünel ya da kurulum gerekmez.
+
+**Güvenlik:** link ve anahtar iki ayrı sırdır, ikisi birlikte gerekir. Biri sızarsa tek başına işe
+yaramaz. İkisi birden sızarsa o uygulamanın anahtarını panelden **İptal et**, yenisini üret;
+hesapların kendisine ve oturumlarına bu yoldan ulaşılamaz. Her uygulamaya ayrı anahtar ver; istersen
+günlük üst sınır ve model listesi koy.
+
+Aynı sunucudaki uygulamalar için (n8n gibi) internete hiç çıkmayan iç adres de kullanılabilir;
+biraz daha hızlıdır (anahtar üretirken kaynak adres yazılır, "internetten" işareti gerekmez):
+
+| Uygulama | İç adres | Anahtarın kaynak adresi |
 |---|---|---|
-| **VPS'teki Docker** (n8n dahil) | `http://host.docker.internal:18090` | hayır |
-| **VPS'in kendisi** | `http://127.0.0.1:18090` | hayır |
-| **Başka bir sunucu / bilgisayar** (kendi uygulamaların, laptop, başka VPS) | `http://100.102.156.33:18090` | hayır, o makinede Tailscale yeterli |
+| VPS'teki Docker (n8n dahil) | `http://host.docker.internal:18090` | n8n için `172.19.0.0/16` |
+| VPS'in kendisi | `http://127.0.0.1:18090` | `127.0.0.1` |
 
-OpenAI uyumlu kullanımda adresin sonuna `/v1` eklenir (`.../v1`); Gemini uyumlu kullanımda adres olduğu gibi.
-
-`100.102.156.33`, **VPS'in** özel (Tailscale) adresidir; senin bilgisayarının değil. Hub genel
-internete kapalıdır. Bu adrese yalnız senin Tailscale ağındaki makinelerin ulaşır.
-
-### Yeni bir makineyi (sunucu, laptop) bağlamak: bir kerelik
-
-1. O makineye Tailscale kur ve kendi Tailscale hesabınla giriş yap (ücretsiz): <https://tailscale.com/download>
-2. Makinenin Tailscale adresini öğren (`tailscale ip -4`, 100.x.y.z).
-3. VPS'te izin ver (API + yönetim sayfası):
-   ```bash
-   ssh miraz-vps gemini-hub-allow 100.x.y.z "laptop"
-   ```
-4. O makinede çalışacak uygulamalar için anahtarı bu adresle üret (aşağıda).
-
-Docker içindeki uygulama için compose'a şunu ekle (n8n'de zaten var):
+Docker'da `host.docker.internal` için compose'a şunu ekle (n8n'de zaten var):
 ```yaml
 extra_hosts:
   - "host.docker.internal:host-gateway"
@@ -37,26 +39,34 @@ extra_hosts:
 
 ## 2. Yönetim sayfası ve anahtar üretme
 
-- Tailscale'li herhangi bir cihazından: **`http://100.102.156.33:18091`**. Tarayıcı oturumu 30 gün açık kalır.
-- İlk girişte yönetici anahtarı sorulur. Anahtarı bir kez alıp parola yöneticine kaydet:
-  ```bash
-  ssh miraz-vps cat /etc/gemini-hub/admin-token
-  ```
-  Ya da tek kullanımlık giriş bağlantısı al (10 dk geçerli):
-  ```bash
-  ssh miraz-vps gemini-hub-login
-  ```
-  `100.102.156.33` ile başlayan satırı aç.
-- **Uygulamalar** → ad + **kaynak adres** + (isteğe bağlı) model listesi ve günlük sınır → **Anahtar üret**.
-  Anahtar yalnız o an gösterilir; bir kenara kaydet.
+Yönetim sayfası bilerek internete **kapalıdır**; oradan hesaplara giriş ekranı açılabildiği için
+en hassas kısım orasıdır. Açmanın iki yolu var:
 
-Kaynak adres, anahtarın **hangi makineden** çalışacağıdır. Bu yüzden sızan bir anahtar başka yerde işe yaramaz.
+- **Tailscale'li bir cihazdan (önerilen, tünelsiz):** kendi PC'ne ve telefonuna bir kez Tailscale
+  kur, sonra `http://100.102.156.33:18091` linkini aç. Bilgisayarın bu cihazlardan biri olarak zaten
+  izinli. Yeni bir cihaza izin vermek için:
+  ```bash
+  ssh miraz-vps gemini-hub-allow 100.x.y.z "telefon"
+  ```
+- **SSH tüneliyle (Tailscale'siz):**
+  ```bash
+  ssh -N -L 18091:127.0.0.1:18091 miraz-vps
+  ```
+  Sonra `http://127.0.0.1:18091`.
 
-| Uygulama | Kaynak adres |
-|---|---|
-| n8n (VPS, `newsroom-v2_default` ağı) | `172.19.0.0/16` |
-| VPS'teki başka bir Docker ağı | o ağın alt ağı (`docker network inspect <ağ>` → Subnet) |
-| Tailscale'li bir makine | o makinenin 100.x adresi (birden fazlaysa virgülle) |
+Giriş: oturum tarayıcıda 30 gün açık kalır. İlk girişte yönetici anahtarı sorulur; anahtarı bir kez
+alıp parola yöneticine kaydedebilirsin:
+```bash
+ssh miraz-vps cat /etc/gemini-hub/admin-token
+```
+Ya da 10 dakika geçerli tek kullanımlık giriş bağlantısı al:
+```bash
+ssh miraz-vps gemini-hub-login
+```
+
+**Anahtar üretme:** **Uygulamalar** → ad → "internetten (genel link)" işaretli kalsın (iç adres
+kullanacaksan kaynak adresi yaz) → isteğe bağlı model listesi ve günlük sınır → **Anahtar üret**.
+Anahtar ve link yalnız o an gösterilir; ikisini birlikte kaydet.
 
 ## 3. Model adları
 
@@ -79,7 +89,8 @@ model ve hesaptan geldiği `x-hub-model-label` ve `x-hub-account` başlıkların
 
 1. **Credentials → New → OpenAI**
    - API Key: hub anahtarın (`ghk_…`)
-   - Base URL: `http://host.docker.internal:18090/v1`
+   - Base URL: anahtarla birlikte verilen link (`https://hub.152-53-39-199.sslip.io/p/<gizli-yol>/v1`)
+     ya da iç adres `http://host.docker.internal:18090/v1`
 2. OpenAI düğümlerinde bu kimliği seç; **Model** alanına listeden ya da elle `gemini-3.8-flash`
    (veya `gemini-3.1-pro`, `gemini-4-argon`) yaz.
 3. Düğüm ayarlarında **Timeout**'u yükselt (örn. 900000 ms). Pro modeller dakikalarca düşünebilir;
@@ -89,7 +100,8 @@ model ve hesaptan geldiği `x-hub-model-label` ve `x-hub-account` başlıkların
 
 ### Yol B — HTTP Request düğümü (Gemini biçimi, JSON şeması ile)
 
-- Method `POST`, URL: `http://host.docker.internal:18090/v1beta/models/gemini-3.8-flash:generateContent`
+- Method `POST`, URL: `<Gemini linki>/v1beta/models/gemini-3.8-flash:generateContent`
+  (genel link: `https://hub.152-53-39-199.sslip.io/p/<gizli-yol>/v1beta/...`, iç adres: `http://host.docker.internal:18090/v1beta/...`)
 - Header: `x-goog-api-key: ghk_…` (Header Auth kimliği olarak kaydet)
 - Body (JSON):
 ```json
@@ -119,7 +131,7 @@ duraklatılmışsa **bekletmez**, hemen `429` döner:
 `Retry-After` başlığı saniye cinsinden ne kadar bekleneceğini söyler. n8n'de IF düğümüyle
 `statusCode == 429` ise başka modele (örn. `gemini-3.8-flash`) ya da resmî Gemini API'sine dallandır.
 
-Önceden bakmak için: `GET http://host.docker.internal:18090/v1/hub/accounts` (aynı anahtarla) →
+Önceden bakmak için: `GET <OpenAI linki>/hub/accounts` (yani `.../p/<gizli-yol>/v1/hub/accounts`, aynı anahtarla) →
 her hesabın `five_hour_pct`, `weekly_pct`, sıfırlanma saatleri, `available` ve sebepleri.
 
 ## 5. Kendi uygulamalarında
@@ -127,8 +139,7 @@ her hesabın `five_hour_pct`, `weekly_pct`, sıfırlanma saatleri, `available` v
 ### Python — OpenAI SDK
 ```python
 from openai import OpenAI
-# VPS içindeki uygulama: http://127.0.0.1:18090/v1 ya da Docker'da http://host.docker.internal:18090/v1
-client = OpenAI(base_url="http://100.102.156.33:18090/v1", api_key="ghk_...", timeout=None)
+client = OpenAI(base_url="https://hub.152-53-39-199.sslip.io/p/<gizli-yol>/v1", api_key="ghk_...", timeout=None)
 r = client.chat.completions.create(
     model="gemini-3.8-flash",
     messages=[{"role": "system", "content": "Kısa cevap ver."},
@@ -142,14 +153,14 @@ Akış (stream) için `stream=True`; görsel için `{"type": "image_url", "image
 ```python
 from google import genai
 from google.genai import types
-client = genai.Client(api_key="ghk_...", http_options=types.HttpOptions(base_url="http://100.102.156.33:18090", timeout=None))
+client = genai.Client(api_key="ghk_...", http_options=types.HttpOptions(base_url="https://hub.152-53-39-199.sslip.io/p/<gizli-yol>", timeout=None))
 r = client.models.generate_content(model="gemini-3.1-pro", contents="Bir şiir yaz.")
 print(r.text)
 ```
 
 ### Node.js
 ```js
-const res = await fetch('http://100.102.156.33:18090/v1/chat/completions', {
+const res = await fetch('https://hub.152-53-39-199.sslip.io/p/<gizli-yol>/v1/chat/completions', {
   method: 'POST',
   headers: { 'content-type': 'application/json', authorization: 'Bearer ghk_...' },
   body: JSON.stringify({ model: 'gemini-3.8-flash', messages: [{ role: 'user', content: 'Merhaba' }] }),
@@ -162,7 +173,7 @@ else console.log(data.choices[0].message.content);
 
 ### curl
 ```bash
-curl http://100.102.156.33:18090/v1/chat/completions -H "Authorization: Bearer ghk_..." -H "content-type: application/json" -d '{"model":"gemini-3.8-flash","messages":[{"role":"user","content":"Merhaba"}]}'
+curl https://hub.152-53-39-199.sslip.io/p/<gizli-yol>/v1/chat/completions -H "Authorization: Bearer ghk_..." -H "content-type: application/json" -d '{"model":"gemini-3.8-flash","messages":[{"role":"user","content":"Merhaba"}]}'
 ```
 
 ## 6. Bilmen gerekenler
