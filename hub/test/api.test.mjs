@@ -120,13 +120,16 @@ test('key is accepted from x-goog-api-key, x-api-key and ?key=', async (t) => {
   }
 });
 
-test('repeated failures block the source address', async (t) => {
+test('repeated failures block further bad keys from that source, not its valid keys', async (t) => {
   const a = await startApi(t);
   for (let i = 0; i < 10; i++) await (await a.call('/v1/models', { key: 'bad' })).text();
-  const res = await a.call('/v1/models');
-  assert.equal(res.status, 429);
-  assert.equal(res.headers.get('retry-after'), '1800');
-  assert.equal((await res.json()).error.code, 'blocked');
+  const bad = await a.call('/v1/models', { key: 'bad' });
+  assert.equal(bad.status, 429);
+  assert.equal(bad.headers.get('retry-after'), '1800');
+  assert.equal((await bad.json()).error.code, 'blocked');
+  const good = await a.call('/v1/models');
+  assert.equal(good.status, 200);
+  await good.text();
 });
 
 test('OpenAI non-stream: response shape, headers, request handed to the scheduler', async (t) => {
