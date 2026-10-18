@@ -590,6 +590,19 @@ export class Scheduler {
       }
     }
     for (const [k, v] of this.inflight) if (v.done && now - v.at > this.config.dedupeWindowMs) this.inflight.delete(k);
+    // Tell the operator before refusals start: demand near the safe daily capacity.
+    if (now - (this.lastCapacityCheck ?? 0) > 30 * 60_000) {
+      this.lastCapacityCheck = now;
+      for (const c of this.capacity(now)) {
+        if (c.requests_24h > c.safe_per_day * 0.8 || c.rejected_24h > 0) {
+          this.alerts.notify({
+            key: `capacity:${c.model}`,
+            title: `${c.label}: near the safe limit`,
+            message: `${c.requests_24h} requests in 24 h, ${c.rejected_24h} refused; the signed-in accounts can safely carry about ${c.safe_per_day} a day. Add an account or lower the load.`,
+          });
+        }
+      }
+    }
     if (now - (this.lastPrune ?? 0) > 6 * HOUR) {
       this.lastPrune = now;
       this.store.pruneUsage(now - 30 * DAY);
