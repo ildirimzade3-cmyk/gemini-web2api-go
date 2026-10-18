@@ -107,6 +107,12 @@ export class AdminServer {
     if (req.method !== 'GET' && !timingSafeEqualStr(String(req.headers['x-csrf'] ?? ''), s.csrf)) return this.#json(res, 403, { error: 'bad csrf' });
     if (req.method === 'GET' && p.startsWith('/viewer/')) return this.#html(res, VIEWER_HTML);
     if (req.method === 'GET' && p === '/api/state') return this.#json(res, 200, this.#state(s));
+    const outline = /^\/api\/accounts\/(a\d+)\/outline$/.exec(p);
+    if (req.method === 'GET' && outline) {
+      const g = this.scheduler.runtimes.get(outline[1])?.gpage;
+      if (!g) return this.#json(res, 409, { error: 'the work browser of this account is closed' });
+      return this.#json(res, 200, await g.diagnostic());
+    }
     const shot = /^\/api\/accounts\/(a\d+)\/screenshot$/.exec(p);
     if (req.method === 'GET' && shot) return this.#screenshot(res, shot[1]);
     if (req.method === 'POST' && p === '/logout') {

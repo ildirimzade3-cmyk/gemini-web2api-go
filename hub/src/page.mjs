@@ -111,7 +111,9 @@ export function readChatState(args) {
       break;
     }
   }
-  if (!root) return { stop, found: false, count: 0, busy: false, complete: false, text: '', code_blocks: [] };
+  // Model turns on the page (a turn exists while the model is still thinking, before any answer text).
+  const responses = document.querySelectorAll('model-response').length;
+  if (!root) return { stop, found: false, count: 0, responses, busy: false, complete: false, text: '', code_blocks: [] };
 
   const SKIP = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'BUTTON', 'SVG', 'MAT-ICON', 'GEM-ICON', 'GEM-ICON-BUTTON', 'SOURCES-LIST', 'MESSAGE-ACTIONS']);
   // Paragraph-like blocks are separated by a blank line, line-like blocks by a line break.
@@ -189,5 +191,5 @@ export function readChatState(args) {
   const container = root.closest('model-response');
   const footer = container ? container.querySelector('.response-footer') : null;
   const complete = Boolean(footer && footer.classList.contains('complete'));
-  return { stop, found: true, count, busy, complete, text, code_blocks: codeBlocks };
+  return { stop, found: true, count, responses, busy, complete, text, code_blocks: codeBlocks };
 }

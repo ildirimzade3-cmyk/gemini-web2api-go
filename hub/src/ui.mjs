@@ -21,7 +21,7 @@ export const ATTACHED_PROMPT_INSTRUCTION =
 export const DEFAULT_SELECTORS = Object.freeze({
   input: ['rich-textarea div.ql-editor[contenteditable="true"]', 'div.ql-editor[contenteditable="true"]', '[role="textbox"][contenteditable="true"]'],
   send: ['button[aria-label*="send message" i]', 'button.send-button', 'button[aria-label="Send"]'],
-  stop: ['button[aria-label="Stop response"]', 'button[aria-label*="stop response" i]', 'button[aria-label*="stop generating" i]'],
+  stop: ['button[aria-label="Stop response"]', 'button[aria-label*="stop response" i]', 'button[aria-label*="stop generating" i]', 'button[aria-label^="Stop" i]', 'button.send-button.stop'],
   answer: ['model-response message-content', 'model-response .markdown'],
   userTurn: ['user-query', '[data-test-id="user-query"]'],
   copy: ['message-actions button[aria-label="Copy"]', 'message-actions button[aria-label^="Copy" i]', 'button[data-test-id="copy-button"]'],
@@ -400,6 +400,7 @@ export class GeminiPage {
    */
   async send({ files = false } = {}) {
     const before = await this.#counts();
+    this.responsesBefore = await this.page.evaluate(() => document.querySelectorAll('model-response').length).catch(() => 0);
     for (let attempt = 0; attempt < 2; attempt++) {
       // With files the button stays disabled until the upload finished; without, 8 s is plenty.
       const btn = await this.#first('send', { timeout: attempt ? 2000 : files ? 120_000 : 8000 });
@@ -437,8 +438,15 @@ export class GeminiPage {
       await this.#scanAlerts(true);
       const st = await this.#state();
       const now = Date.now();
+      // A new model turn without text yet = the model is thinking: keep waiting, however long.
+      const thinking = st.responses > (this.responsesBefore ?? 0);
+      if (!st.found && !st.stop && thinking) {
+        noAnswerSince = now;
+        await sleep(400);
+        continue;
+      }
       if (!st.found && !st.stop) {
-        if (now - noAnswerSince > 20_000) {
+        if (now - noAnswerSince > (triedRepair ? 90_000 : 45_000)) {
           if (this.repairKey && !triedRepair) {
             triedRepair = true;
             const p = await this.#propose('answer');
