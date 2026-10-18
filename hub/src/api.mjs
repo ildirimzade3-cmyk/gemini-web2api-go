@@ -238,6 +238,8 @@ export class ApiServer {
         model: result.model,
         choices: [{ index: 0, message: { role: 'assistant', content: result.text }, finish_reason: 'stop' }],
         usage,
+        // Same facts as the x-hub-* headers, also here because a held response sent its headers early.
+        hub: { model_label: result.label, account: result.account, deduplicated: Boolean(result.deduplicated) },
       },
       this.#meta(result),
     );

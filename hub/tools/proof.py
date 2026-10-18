@@ -159,9 +159,11 @@ def call(base, key, task):
                 answered = model  # streams carry no model header; the hub log records the verified model
             else:
                 raw = client.chat.completions.with_raw_response.create(model=model, messages=req["messages"])
-                text = raw.parse().choices[0].message.content
-                answered = raw.headers.get("x-hub-model")
-                rec.update(account=raw.headers.get("x-hub-account"), dedup=raw.headers.get("x-hub-deduplicated"))
+                r = raw.parse()
+                text = r.choices[0].message.content
+                hub = (r.model_extra or {}).get("hub") or {}
+                answered = raw.headers.get("x-hub-model") or r.model
+                rec.update(account=raw.headers.get("x-hub-account") or hub.get("account"), held=raw.headers.get("x-hub-held") == "1")
         else:
             client = genai.Client(api_key=key, http_options=types.HttpOptions(base_url=base, timeout=None))
             cfg = types.GenerateContentConfig(response_mime_type="application/json", response_schema=req["schema"]) if "schema" in req else None
