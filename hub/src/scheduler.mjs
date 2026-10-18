@@ -425,9 +425,15 @@ export class Scheduler {
     }
     if (!candidates.length) return null;
     const warmCount = [...this.runtimes.values()].filter((r) => r.warm).length;
+    // Spread the load by Gemini's own meter (5-hour window, in 20-point steps), then
+    // prefer an open browser, then the most remaining count budget, then least recently used.
+    const band = (c) => Math.floor((c.s.meter.five_hour?.used_pct ?? 0) / 20);
     candidates.sort(
       (x, y) =>
-        Number(y.rt.warm) - Number(x.rt.warm) || y.s.remaining / y.s.budget - x.s.remaining / x.s.budget || x.rt.lastUsed - y.rt.lastUsed,
+        band(x) - band(y) ||
+        Number(y.rt.warm) - Number(x.rt.warm) ||
+        y.s.remaining / y.s.budget - x.s.remaining / x.s.budget ||
+        x.rt.lastUsed - y.rt.lastUsed,
     );
     const best = candidates[0];
     if (!best.rt.warm && warmCount >= this.config.maxWarmBrowsers) {
