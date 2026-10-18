@@ -28,6 +28,23 @@ const CHROME_ARGS = [
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * After a hard stop (container restart) Chrome would restore the previous tabs and
+ * load them all at once next to ours. Marking the last exit as clean prevents that
+ * burst of page loads.
+ */
+function markCleanExit(profile) {
+  const file = path.join(profile, 'Default', 'Preferences');
+  try {
+    const prefs = JSON.parse(fs.readFileSync(file, 'utf8'));
+    prefs.profile = { ...prefs.profile, exit_type: 'Normal', exited_cleanly: true };
+    prefs.session = { ...prefs.session, restore_on_startup: 5 };
+    fs.writeFileSync(file, JSON.stringify(prefs));
+  } catch {
+    // new profile: nothing to restore
+  }
+}
+
 function run(cmd, args) {
   return new Promise((resolve, reject) => {
     const p = spawn(cmd, args, { stdio: 'ignore' });
@@ -111,6 +128,7 @@ export class AccountRuntime {
     if (this.signin) throw Object.assign(new Error('the sign-in view is open for this account'), { code: 'signin_open' });
     if (this.context) return this.gpage;
     fs.mkdirSync(this.profile, { recursive: true, mode: 0o700 });
+    markCleanExit(this.profile);
     await this.#ensureDisplay();
     const t0 = Date.now();
     this.context = await chromium.launchPersistentContext(this.profile, {
@@ -177,6 +195,7 @@ export class AccountRuntime {
     if (this.signin) return { port: this.vncPort, password: this.signin.password };
     await this.close('sign-in');
     fs.mkdirSync(this.profile, { recursive: true, mode: 0o700 });
+    markCleanExit(this.profile);
     await this.#ensureDisplay();
     for (const f of ['SingletonLock', 'SingletonSocket', 'SingletonCookie']) fs.rmSync(path.join(this.profile, f), { force: true });
     const chrome = spawn(this.deps.config.chromePath, [`--user-data-dir=${this.profile}`, ...CHROME_ARGS, APP_URL], {

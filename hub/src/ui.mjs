@@ -533,17 +533,23 @@ export class GeminiPage {
    * the way a person checks it, then returns to the app. Returns { meters, raw }.
    */
   async readUsage() {
-    await this.page.goto(USAGE_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 });
-    await this.#checkPage(false);
-    let raw = '';
-    for (let i = 0; i < 20; i++) {
-      await sleep(500);
-      raw = await this.page.evaluate(() => (document.querySelector('main') || document.body).innerText || '').catch(() => '');
-      if (/%/.test(raw)) break;
+    // A second tab, closed afterwards: one page load, and the chat tab is not reloaded.
+    const tab = await this.page.context().newPage();
+    try {
+      const res = await tab.goto(USAGE_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+      if (res?.status() === 429) throw new UiError('throttled', 'the usage page answered HTTP 429 (too many requests)');
+      let raw = '';
+      for (let i = 0; i < 20; i++) {
+        await sleep(500);
+        raw = await tab.evaluate(() => (document.querySelector('main') || document.body).innerText || '').catch(() => '');
+        if (/%/.test(raw)) break;
+      }
+      await sleep(800 + Math.random() * 1200);
+      return { meters: parseUsage(raw, Date.now(), this.tz), raw: raw.slice(0, 4000) };
+    } finally {
+      await tab.close().catch(() => {});
+      await this.page.bringToFront().catch(() => {});
     }
-    await sleep(800 + Math.random() * 1200);
-    await this.page.goto(APP_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => {});
-    return { meters: parseUsage(raw, Date.now(), this.tz), raw: raw.slice(0, 4000) };
   }
 
   /** Text-free outline for diagnostics when a step breaks. */
