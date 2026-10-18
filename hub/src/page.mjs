@@ -19,13 +19,16 @@ export function collectAccountFacts() {
   const signInVisible = Array.from(document.querySelectorAll('a, button')).some(
     (el) => visible(el) && /^sign in$/i.test((el.innerText || el.getAttribute('aria-label') || '').trim()),
   );
-  // Plan hints: an "Upgrade" call to action means a free plan; a plan badge means a paid one.
-  const texts = Array.from(document.querySelectorAll('a, button, [class*="badge" i], [class*="pill" i], [data-test-id*="upgrade" i]'))
-    .filter(visible)
-    .map((el) => (el.innerText || el.getAttribute('aria-label') || '').trim().replace(/\s+/g, ' '))
+  // Plan hints: the account entry in the sidebar shows the plan under the name
+  // ("Pro", "Ultra"); an "Upgrade" call to action means a free plan. The model picker
+  // and the chat are skipped (the picker can read "Pro" too).
+  const skip = (el) => el.closest('button[data-test-id="bard-mode-menu-button"], rich-textarea, model-response, user-query, [role="menu"]');
+  const leaves = Array.from(document.querySelectorAll('span, div, a, button, p'))
+    .filter((el) => visible(el) && !skip(el) && el.children.length === 0)
+    .map((el) => (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' '))
     .filter((t) => t && t.length < 60);
-  const upgrade = texts.find((t) => /upgrade|try google ai|get google ai/i.test(t)) || '';
-  const badge = texts.find((t) => /^(pro|ultra|plus|ai pro|ai ultra|ai plus|google ai (pro|ultra|plus))$/i.test(t)) || '';
+  const upgrade = leaves.find((t) => /^(upgrade|upgrade to [\w ]+|try google ai [\w ]+|get google ai [\w ]+)$/i.test(t)) || '';
+  const badge = leaves.find((t) => /^(pro|ultra|plus|ai pro|ai ultra|ai plus|google ai (pro|ultra|plus))$/i.test(t)) || '';
   const picker = document.querySelector('button[data-test-id="bard-mode-menu-button"], button[aria-label^="Open mode picker" i]');
   return {
     // The page's own globals are not visible from the isolated world; the caller adds

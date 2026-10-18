@@ -234,8 +234,11 @@ export class GeminiPage {
     };
     if (await pressed()) return true;
     await found.el.click({ timeout: 5000 }).catch(() => {});
-    await human(500, 1000);
-    return pressed();
+    for (let i = 0; i < 12; i++) {
+      await sleep(250);
+      if (await pressed()) return true;
+    }
+    return false;
   }
 
   async #openPicker() {
@@ -271,6 +274,8 @@ export class GeminiPage {
 
   /** Picks the model with exactly this label and confirms the picker shows it. */
   async selectModel(label) {
+    // Already set (the usual case for consecutive prompts): no need to open the picker.
+    if (this.catalogueLabels && (await this.verifyModel(label)).ok) return;
     const items = parseModelItems(await this.#openPicker());
     const target = items.find((m) => norm(m.label).toLowerCase() === norm(label).toLowerCase());
     if (!target) {
