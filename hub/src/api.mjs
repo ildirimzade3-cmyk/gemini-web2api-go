@@ -9,7 +9,8 @@ import { authenticate, AuthThrottle, ipInCidrs, normalizeIp, parseCidr, sha256 }
 import { RequestError, buildPrompt, fromGemini, fromOpenAI, geminiJson, openAIJson } from './prompt.mjs';
 import { HubError } from './scheduler.mjs';
 
-const MAX_BODY = 60 * 1024 * 1024;
+// Whole request (base64 files included). The prompt text itself has its own cap in prompt.mjs.
+const MAX_BODY = 30 * 1024 * 1024;
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -18,7 +19,7 @@ function readBody(req) {
     req.on('data', (c) => {
       size += c.length;
       if (size > MAX_BODY) {
-        reject(new RequestError('request body too large'));
+        reject(Object.assign(new RequestError(`request body larger than ${MAX_BODY} bytes`, 'too_large'), { status: 413 }));
         req.destroy();
       } else chunks.push(c);
     });
@@ -114,8 +115,11 @@ export class ApiServer {
     const fail = (status, code, message, headers) => send(res, status, errorBody(flavor, status, code, message), headers);
 
     if (url.pathname === '/healthz') return send(res, 200, { ok: true });
-    if (this.throttle.blocked(ip)) return fail(429, 'blocked', 'too many failed authentications', { 'retry-after': '1800' });
+    // A valid key from its bound source always works; a source that keeps sending
+    // bad keys only has its failures refused faster (keys are 256-bit, so guessing
+    // is hopeless anyway; the block is about noise, not about locking out real apps).
     const auth = authenticate(this.store, req, url, ip);
+    if (!auth.app && this.throttle.blocked(ip)) return fail(429, 'blocked', 'too many failed authentications', { 'retry-after': '1800' });
     if (!auth.app) {
       this.throttle.fail(ip);
       this.store.event('warn', 'auth_failed', null, { ip, reason: auth.reason, app: auth.app_id ?? null });
@@ -131,7 +135,7 @@ export class ApiServer {
       if (req.method === 'POST' && m) return await this.#gemini(req, res, app, decodeURIComponent(m[1]), m[2] === 'streamGenerateContent', url);
       return fail(404, 'not_found', 'unknown endpoint');
     } catch (e) {
-      if (e instanceof RequestError) return fail(400, e.code, e.message);
+      if (e instanceof RequestError) return fail(e.status ?? 400, e.code, e.message);
       if (e instanceof HubError) {
         const headers = e.retryAfter ? { 'retry-after': String(e.retryAfter) } : {};
         if (res.hubHeld === 'json') return send(res, e.status, errorBody(flavor, e.status, e.code, e.message));

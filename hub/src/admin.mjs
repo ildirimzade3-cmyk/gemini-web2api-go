@@ -16,7 +16,8 @@ import { HubError } from './scheduler.mjs';
 import { ADMIN_HTML, VIEWER_HTML } from './admin-ui.mjs';
 
 const NOVNC_DIR = '/opt/novnc';
-const SESSION_MS = 12 * 3_600_000;
+// Admin sessions live in the database (hashed) so a hub restart does not log the operator out.
+const SESSION_MS = 30 * 86_400_000;
 const MIME = { '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png' };
 
 function isLoopback(ip) {
@@ -26,7 +27,6 @@ function isLoopback(ip) {
 export class AdminServer {
   constructor({ config, store, scheduler, log }) {
     Object.assign(this, { config, store, scheduler, log });
-    this.sessions = new Map();
     const i = config.adminListen.lastIndexOf(':');
     this.host = config.adminListen.slice(0, i);
     this.port = Number(config.adminListen.slice(i + 1));
@@ -58,9 +58,9 @@ export class AdminServer {
   #session(req) {
     const m = /(?:^|;\s*)hub_admin=([A-Za-z0-9]+)/.exec(req.headers.cookie ?? '');
     if (!m) return null;
-    const s = this.sessions.get(sha256(m[1]));
-    if (!s || s.exp < Date.now()) return null;
-    return s;
+    const key = sha256(m[1]);
+    const s = this.store.get('admin_sessions', []).find((x) => x.key === key && x.exp > Date.now());
+    return s ?? null;
   }
 
   #json(res, status, obj, headers = {}) {
@@ -110,7 +110,7 @@ export class AdminServer {
     const shot = /^\/api\/accounts\/(a\d+)\/screenshot$/.exec(p);
     if (req.method === 'GET' && shot) return this.#screenshot(res, shot[1]);
     if (req.method === 'POST' && p === '/logout') {
-      this.sessions.delete(s.key);
+      this.store.set('admin_sessions', this.store.get('admin_sessions', []).filter((x) => x.key !== s.key));
       return this.#json(res, 200, { ok: true }, { 'set-cookie': 'hub_admin=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict' });
     }
 
@@ -119,7 +119,14 @@ export class AdminServer {
     if (req.method === 'POST' && p === '/api/accounts') return this.#json(res, 200, this.scheduler.addAccount(String(body.label ?? '').slice(0, 40)));
     if ((m = /^\/api\/accounts\/(a\d+)\/signin-status$/.exec(p)) && req.method === 'GET') {
       const rt = this.scheduler.runtimes.get(m[1]);
-      return this.#json(res, 200, { open: Boolean(rt?.signin), signed_in: Boolean(rt?.signin && rt.signInSeen()) });
+      const acct = this.store.account(m[1]);
+      return this.#json(res, 200, {
+        open: Boolean(rt?.signin),
+        signed_in: Boolean(rt?.signin && rt.signInSeen()),
+        state: acct?.state,
+        identity: acct?.identity,
+        models: acct?.models?.length ?? 0,
+      });
     }
     if ((m = /^\/api\/accounts\/(a\d+)\/(signin|done|refresh|pause|resume|remove|sleep)$/.exec(p)) && req.method === 'POST') {
       return this.#json(res, 200, await this.#accountAction(m[1], m[2], body));
@@ -132,6 +139,7 @@ export class AdminServer {
       this.store.event('warn', 'chaos_set', m[1], { kind: rt.chaos });
       return this.#json(res, 200, { chaos: rt.chaos });
     }
+    if ((m = /^\/api\/accounts\/(a\d+)\/usage$/.exec(p)) && req.method === 'POST') return this.#json(res, 200, await this.scheduler.readUsage(m[1], { raw: true }));
     if (req.method === 'POST' && p === '/api/apps') return this.#json(res, 200, this.#createApp(body));
     if ((m = /^\/api\/apps\/([\w-]+)\/(revoke|update)$/.exec(p)) && req.method === 'POST') return this.#json(res, 200, this.#appAction(m[1], m[2], body));
     if (req.method === 'POST' && p === '/api/test-alert') {
@@ -156,7 +164,8 @@ export class AdminServer {
     const raw = crypto.randomBytes(32).toString('hex');
     const key = sha256(raw);
     const csrf = crypto.randomBytes(24).toString('hex');
-    this.sessions.set(key, { key, csrf, exp: Date.now() + SESSION_MS });
+    const live = this.store.get('admin_sessions', []).filter((x) => x.exp > Date.now()).slice(-9);
+    this.store.set('admin_sessions', [...live, { key, csrf, exp: Date.now() + SESSION_MS }]);
     this.store.event('info', 'admin_login', null, {});
     return this.#json(res, 200, { csrf }, { 'set-cookie': `hub_admin=${raw}; Path=/; Max-Age=${SESSION_MS / 1000}; HttpOnly; SameSite=Strict` });
   }

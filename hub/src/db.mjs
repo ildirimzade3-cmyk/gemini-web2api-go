@@ -22,7 +22,8 @@ CREATE TABLE IF NOT EXISTS accounts (
   sleep_start_min INTEGER NOT NULL,       -- UTC minute of day the daily rest starts
   sleep_len_min INTEGER NOT NULL,
   last_open_at INTEGER NOT NULL DEFAULT 0,
-  last_job_at INTEGER NOT NULL DEFAULT 0
+  last_job_at INTEGER NOT NULL DEFAULT 0,
+  usage TEXT NOT NULL DEFAULT '{}'        -- Gemini's own usage meter, read from /usage
 );
 CREATE TABLE IF NOT EXISTS apps (
   id TEXT PRIMARY KEY,
@@ -78,6 +79,9 @@ export class Store {
     this.db = new DatabaseSync(file);
     this.db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;');
     this.db.exec(SCHEMA);
+    // Migrations for databases created by earlier versions.
+    const cols = this.db.prepare('PRAGMA table_info(accounts)').all().map((c) => c.name);
+    if (!cols.includes('usage')) this.db.exec("ALTER TABLE accounts ADD COLUMN usage TEXT NOT NULL DEFAULT '{}'");
     if (file !== ':memory:') fs.chmodSync(file, 0o600);
   }
 
@@ -111,7 +115,7 @@ export class Store {
   updateAccount(id, fields) {
     const cols = Object.keys(fields);
     if (!cols.length) return;
-    const vals = cols.map((c) => (c === 'models' ? JSON.stringify(fields[c]) : fields[c]));
+    const vals = cols.map((c) => (c === 'models' || c === 'usage' ? JSON.stringify(fields[c]) : fields[c]));
     this.q(`UPDATE accounts SET ${cols.map((c) => `${c} = ?`).join(', ')} WHERE id = ?`).run(...vals, id);
   }
   deleteAccount(id) {
@@ -200,5 +204,5 @@ export class Store {
 }
 
 function rowToAccount(r) {
-  return { ...r, models: JSON.parse(r.models || '[]') };
+  return { ...r, models: JSON.parse(r.models || '[]'), usage: JSON.parse(r.usage || '{}') };
 }

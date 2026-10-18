@@ -82,7 +82,7 @@ else fetch('/api/state').then(r=>r.ok?r.json():null).then(s=>{if(s){show(true);r
 
 export const VIEWER_HTML = `<!doctype html><html lang="tr"><head><meta charset="utf-8"><title>Gemini Hub — giriş</title><style>${STYLE}
 #screen{width:100%;height:calc(100vh - 56px);background:#000}</style></head><body>
-<header><h1>Hesaba giriş</h1><span class="mute">Aşağıdaki ekran hub'ın kendi tarayıcısı. Gemini'de sağ üstteki <b>Sign in</b> ile Google hesabınıza girin.</span><span style="flex:1"></span><span id="st" class="mute">bağlanıyor…</span><span id="seen" class="warn">giriş henüz görülmedi</span><button class="primary" id="done" disabled>Girişi bitirdim</button><a href="#" id="force" class="mute" style="font-size:12px">yine de bitir</a></header>
+<header><h1>Hesaba giriş</h1><span class="mute">Aşağıdaki ekran hub'ın kendi tarayıcısı. Gemini'de sağ üstteki <b>Sign in</b> ile Google hesabınıza girin; hub girişi kendisi algılayıp tamamlar.</span><span style="flex:1"></span><span id="st" class="mute">bağlanıyor…</span><span id="seen" class="warn">giriş henüz görülmedi</span><button class="primary" id="done" disabled>Girişi bitirdim</button><a href="#" id="force" class="mute" style="font-size:12px">yine de bitir</a></header>
 <div id="screen"></div>
 <script type="module">
 import RFB from '/novnc/core/rfb.js';
@@ -92,7 +92,9 @@ rfb.scaleViewport=true;rfb.resizeSession=false;
 rfb.addEventListener('connect',()=>document.getElementById('st').textContent='bağlı');
 rfb.addEventListener('disconnect',()=>document.getElementById('st').textContent='bağlantı kapandı');
 const poll=async()=>{try{const s=await fetch('/api/accounts/'+id+'/signin-status').then(r=>r.json());
- const e=document.getElementById('seen');if(!e)return;if(s.signed_in){e.textContent='giriş algılandı ✓';e.className='ok';document.getElementById('done').disabled=false}}catch{}};
+ const e=document.getElementById('seen');if(!e)return;
+ if(!s.open&&s.state==='ready'){sessionStorage.removeItem('vnc:'+id);document.body.innerHTML='<main><section><h2>Hazır</h2><p>Giriş otomatik algılandı, hesap kullanıma alındı: '+(s.identity||'')+' · '+s.models+' model. Bu pencereyi kapatabilirsiniz.</p></section></main>';return}
+ if(s.signed_in){e.textContent='giriş algılandı ✓ — birkaç saniye içinde otomatik tamamlanacak';e.className='ok';document.getElementById('done').disabled=false}}catch{}};
 setInterval(poll,3000);poll();
 document.getElementById('force').onclick=(ev)=>{ev.preventDefault();if(confirm('Hub girişi henüz görmedi. Yine de bitirilsin mi?'))finish()};
 document.getElementById('done').onclick=()=>finish();

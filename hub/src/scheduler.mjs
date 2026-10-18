@@ -86,16 +86,43 @@ export class Scheduler {
     this.store.event(state === 'attention' ? 'alert' : 'info', `account_${state}`, id, { reason });
   }
 
+  /**
+   * Opens the sign-in view and watches it: once the profile holds a Google session
+   * (seen twice, 4 s apart) and 10 s more have passed for Google's own pages, the
+   * view is closed and the account checked, with no button to press.
+   */
   async startSignIn(id) {
     const rt = this.runtimes.get(id);
     if (!rt) throw new HubError(404, 'not_found', 'no such account');
-    return rt.startSignIn();
+    const r = await rt.startSignIn();
+    if (!rt.signinWatch) {
+      let seen = 0;
+      rt.signinWatch = setInterval(() => {
+        if (!rt.signin) return this.#stopWatch(rt);
+        seen = rt.signInSeen() ? seen + 1 : 0;
+        if (seen === 2) {
+          this.#stopWatch(rt);
+          setTimeout(() => {
+            if (!rt.signin) return;
+            this.store.event('info', 'signin_detected', id, {});
+            this.finishSignIn(id).catch((e) => this.log('signin_finish_error', { account: id, error: e.message }));
+          }, 10_000);
+        }
+      }, 4000);
+    }
+    return r;
+  }
+
+  #stopWatch(rt) {
+    clearInterval(rt.signinWatch);
+    rt.signinWatch = null;
   }
 
   /** Ends the sign-in view and checks the account: signed in -> ready with its catalogue. */
   async finishSignIn(id) {
     const rt = this.runtimes.get(id);
     if (!rt) throw new HubError(404, 'not_found', 'no such account');
+    this.#stopWatch(rt);
     await rt.stopSignIn();
     return this.refreshAccount(id);
   }
@@ -116,6 +143,24 @@ export class Scheduler {
       if (info.signed_in && acct.state !== 'paused') this.setState(id, 'ready', `${info.identity} (${info.plan})`);
       if (!info.signed_in) this.setState(id, acct.state === 'new' ? 'new' : 'attention', 'not signed in');
       return this.store.account(id);
+    } finally {
+      rt.busy = false;
+      rt.lastUsed = Date.now();
+    }
+  }
+
+  /** Reads Gemini's usage meter for an idle account and stores it. */
+  async readUsage(id, { raw = false } = {}) {
+    const rt = this.runtimes.get(id);
+    if (!rt) throw new HubError(404, 'not_found', 'no such account');
+    if (rt.busy) throw new HubError(409, 'busy', 'the account is answering a prompt');
+    rt.busy = true;
+    try {
+      const g = await rt.open();
+      const r = await g.readUsage();
+      const usage = { meters: r.meters, read_at: Date.now() };
+      this.store.updateAccount(id, { usage });
+      return raw ? { ...usage, raw: r.raw } : usage;
     } finally {
       rt.busy = false;
       rt.lastUsed = Date.now();
@@ -417,7 +462,7 @@ export class Scheduler {
       try {
         prompts = 1;
         sent = true;
-        await g.send();
+        await g.send({ files: files.length > 0 });
         step('send');
       } catch (e) {
         if (e instanceof UiError && !e.sent && e.code === 'ui_changed' && e.role === 'send') {
@@ -569,12 +614,16 @@ export class Scheduler {
         await rt.close(rest.resting ? 'rest' : 'idle');
         continue;
       }
-      // Keep the session fresh the way a person does: open Gemini now and then, no prompt.
+      // Keep the Google session fresh the way a person does: every 5-7 hours (outside the
+      // rest window) Gemini is opened for about a minute, no prompt. Chrome itself then
+      // rotates the session cookies, so an idle account is never signed out for staleness.
       const quietFor = now - Math.max(a.last_open_at, a.last_job_at);
-      if (a.state === 'ready' && !rest.resting && !rt.warm && quietFor > 30 * HOUR + (a.id.charCodeAt(1) % 6) * HOUR) {
+      const visitEvery = (5 + ((a.id.charCodeAt(1) + Math.floor(now / 86_400_000)) % 3)) * HOUR;
+      if (a.state === 'ready' && !rest.resting && !rt.warm && quietFor > visitEvery) {
         rt.busy = true;
         try {
           const facts = await rt.inspect();
+          await new Promise((r) => setTimeout(r, 45_000 + Math.random() * 45_000));
           this.store.event('info', 'session_visit', a.id, { signed_in: facts.signed_in });
           if (!facts.signed_in) {
             this.setState(a.id, 'attention', 'signed out (found during a session visit)');

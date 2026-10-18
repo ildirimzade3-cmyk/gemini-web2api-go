@@ -9,7 +9,10 @@ import { collectAccountFacts, collectAlerts, collectModelMenu, readChatState } f
 import { collectAnswerOutline, collectPageSummary, proposeAnswerSelectors, proposeSelectors, trimSummary } from './repair-ai.mjs';
 import { parseResetTime } from './policy.mjs';
 
-export const APP_URL = 'https://gemini.google.com/app';
+// hl=en: every account's UI in English whatever its Google language, so one set of
+// labels and selectors fits all accounts.
+export const APP_URL = 'https://gemini.google.com/app?hl=en';
+export const USAGE_URL = 'https://gemini.google.com/usage?hl=en';
 /** Prompts above this size are attached as message.txt instead of being pasted. */
 export const ATTACH_THRESHOLD_BYTES = 30 * 1024;
 export const ATTACHED_PROMPT_INSTRUCTION =
@@ -146,7 +149,8 @@ export class GeminiPage {
 
   /** Loads the app (when not already on it) and waits for the prompt box. */
   async open() {
-    if (!/^https:\/\/gemini\.google\.com\/app/.test(this.page.url())) {
+    const lang = await this.page.evaluate(() => document.documentElement.lang || '').catch(() => '');
+    if (!/^https:\/\/gemini\.google\.com\/app/.test(this.page.url()) || !/^en/i.test(lang)) {
       let res;
       try {
         res = await this.page.goto(APP_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 });
@@ -193,7 +197,8 @@ export class GeminiPage {
   async accountFacts() {
     const [facts, source] = await Promise.all([this.page.evaluate(collectAccountFacts), this.page.content()]);
     const xsrf = /"SNlM0e"\s*:\s*"[^"]{8,}"/.test(source);
-    const signed_in = xsrf && facts.account_link && !facts.sign_in_visible;
+    // The XSRF token is only issued to a signed-in session; no "Sign in" button either.
+    const signed_in = xsrf && !facts.sign_in_visible;
     const plan = !signed_in ? 'unknown' : facts.plan_badge ? 'paid' : facts.upgrade_hint ? 'free' : 'unknown';
     return { signed_in, identity: facts.identity, plan, plan_label: facts.plan_badge || facts.upgrade_hint || '' };
   }
@@ -393,10 +398,11 @@ export class GeminiPage {
    * that nothing was sent (the text is still in the box, no new turn) is send pressed
    * a second time.
    */
-  async send() {
+  async send({ files = false } = {}) {
     const before = await this.#counts();
     for (let attempt = 0; attempt < 2; attempt++) {
-      const btn = await this.#first('send', { timeout: attempt ? 2000 : 120_000 });
+      // With files the button stays disabled until the upload finished; without, 8 s is plenty.
+      const btn = await this.#first('send', { timeout: attempt ? 2000 : files ? 120_000 : 8000 });
       if (btn && (await btn.el.isEnabled().catch(() => false))) await btn.el.click({ timeout: 5000 });
       else await this.page.keyboard.press('Enter');
       const deadline = Date.now() + 15_000;
@@ -513,6 +519,25 @@ export class GeminiPage {
     }, kind);
   }
 
+  /**
+   * Gemini's own usage meter (gemini.google.com/usage): what share of the 5-hour
+   * allowance and of the weekly limit is used and when each resets. Visits the page
+   * the way a person checks it, then returns to the app. Returns { meters, raw }.
+   */
+  async readUsage() {
+    await this.page.goto(USAGE_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+    await this.#checkPage(false);
+    let raw = '';
+    for (let i = 0; i < 20; i++) {
+      await sleep(500);
+      raw = await this.page.evaluate(() => (document.querySelector('main') || document.body).innerText || '').catch(() => '');
+      if (/%/.test(raw)) break;
+    }
+    await sleep(800 + Math.random() * 1200);
+    await this.page.goto(APP_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => {});
+    return { meters: parseUsage(raw, Date.now()), raw: raw.slice(0, 4000) };
+  }
+
   /** Text-free outline for diagnostics when a step breaks. */
   async diagnostic() {
     try {
@@ -546,4 +571,36 @@ export function parseModelItems(raw) {
     out.push({ index, label, description: lines.slice(1).join(' '), id: it.id || '', enabled: it.enabled !== false, selected: Boolean(it.selected) });
   });
   return out;
+}
+
+
+/**
+ * Meters from the usage page text. Each meter is a line naming the window
+ * ("5-hour", "weekly", ...) near a percentage and a reset phrase.
+ * Returns [{ name, used_pct, resets_at }].
+ */
+export function parseUsage(text, now = Date.now()) {
+  const lines = String(text ?? '').split(/\n+/).map(norm).filter(Boolean);
+  const meters = [];
+  for (let i = 0; i < lines.length; i++) {
+    const pct = /(\d{1,3}(?:\.\d+)?)\s*%/.exec(lines[i]);
+    if (!pct) continue;
+    // The window's name sits on or above the percentage, its reset on or below it.
+    const near = lines.slice(Math.max(0, i - 2), i + 1).join(' ');
+    const below = lines.slice(i, i + 3).join(' ');
+    const name = /5[- ]?hour|five[- ]hour/i.test(near)
+      ? '5h'
+      : /week/i.test(near)
+        ? 'weekly'
+        : /\bday|daily/i.test(near)
+          ? 'daily'
+          : `meter${meters.length + 1}`;
+    if (meters.some((m) => m.name === name)) continue;
+    const r = /resets?\s+(?:in\s+)?(?:(\d+)\s*(?:d|days?)\b)?\s*(?:(\d+)\s*(?:h|hr|hrs|hours?)\b)?\s*(?:(\d+)\s*(?:m|min|mins|minutes?)\b)?/i.exec(below);
+    const resets_at =
+      r && (r[1] || r[2] || r[3]) ? now + ((+r[1] || 0) * 1440 + (+r[2] || 0) * 60 + (+r[3] || 0)) * 60_000 : parseResetTime(below, now);
+    const used = /\b(left|remaining)\b/i.test(lines[i]) ? 100 - Number(pct[1]) : Number(pct[1]);
+    meters.push({ name, used_pct: Math.max(0, Math.min(100, used)), resets_at });
+  }
+  return meters;
 }

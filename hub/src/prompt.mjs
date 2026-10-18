@@ -12,7 +12,9 @@ export class RequestError extends Error {
 }
 
 export const MAX_FILES = 10;
-export const MAX_FILE_BYTES = 40 * 1024 * 1024;
+export const MAX_FILE_BYTES = 20 * 1024 * 1024;
+/** About a million tokens: more than any Gemini web model reads in one message. */
+export const MAX_PROMPT_CHARS = 4_000_000;
 
 const EXT = {
   'image/png': 'png',
@@ -124,6 +126,9 @@ export function buildPrompt({ system, turns }, json = null) {
     text = blocks.join('\n\n');
   }
   if (json) text += jsonInstruction(json.schema);
+  if (text.length > MAX_PROMPT_CHARS) {
+    throw Object.assign(new RequestError(`prompt longer than ${MAX_PROMPT_CHARS} characters`, 'too_large'), { status: 413 });
+  }
   if (!text.trim() && !files.length) throw new RequestError('empty prompt');
   return { text, files };
 }
