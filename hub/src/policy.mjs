@@ -55,14 +55,19 @@ export function hourlyCap(account) {
 }
 
 /**
- * Rest after a finished prompt before the account takes the next one: a person reads
- * the answer and writes the next message. 6–16 s plus about a second per 1200
- * characters of answer, at most 40 s in total.
+ * Rest after a finished prompt before the account takes the next one: a person
+ * reads the answer and writes the next message. 2-8 s plus about a second per 2000
+ * characters of answer, at most 18 s. Gemini's own usage meter guards the volume.
  */
 export function restAfterMs(outChars, rnd = Math.random) {
-  const base = 6_000 + rnd() * 10_000;
-  const reading = Math.min(24_000, (outChars / 1200) * 1000);
-  return Math.round(Math.min(40_000, base + reading));
+  const base = 2_000 + rnd() * 6_000;
+  const reading = Math.min(10_000, (outChars / 2000) * 1000);
+  return Math.round(Math.min(18_000, base + reading));
+}
+
+/** Cool-down after Google answered HTTP 429: 3 h, 12 h when it happens again within a day. */
+export function cooldownMs(previousUntil, now = Date.now()) {
+  return previousUntil && now - previousUntil < DAY ? 12 * HOUR : 3 * HOUR;
 }
 
 /**

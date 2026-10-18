@@ -41,7 +41,7 @@ let csrf='';const $=s=>document.querySelector(s);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const t=ms=>ms?new Date(ms).toLocaleString('tr-TR'):'—';
 const STATE={new:['yeni — giriş bekliyor','warn'],ready:['hazır','ok'],paused:['duraklatıldı','mute'],attention:['sizi bekliyor','bad']};
-const BLOCK={usage_5h:'5 saatlik Gemini kotası dolu',usage_weekly:'haftalık Gemini kotası dolu',resting:'dinleniyor',limit:'Google limiti',budget:'günlük güvenli pay doldu',hourly:'saatlik sınır',signin:'giriş ekranı açık',new:'giriş yok',paused:'duraklatıldı',attention:'sizi bekliyor',no_model:'model yok',model_disabled:'model kapalı'};
+const BLOCK={cooldown:'Google yavaşlattı (429) — soğuyor',usage_5h:'5 saatlik Gemini kotası dolu',usage_weekly:'haftalık Gemini kotası dolu',resting:'dinleniyor',limit:'Google limiti',budget:'günlük güvenli pay doldu',hourly:'saatlik sınır',signin:'giriş ekranı açık',new:'giriş yok',paused:'duraklatıldı',attention:'sizi bekliyor',no_model:'model yok',model_disabled:'model kapalı'};
 async function api(path,body){const r=await fetch(path,{method:body?'POST':'GET',headers:{'content-type':'application/json','x-csrf':csrf},body:body?JSON.stringify(body):undefined});
  const j=await r.json().catch(()=>({}));if(r.status===401){show(false);throw new Error('login')}if(!r.ok)throw new Error(j.error||r.status);return j}
 function show(on){$('#login').hidden=on;$('#app').hidden=!on;$('#logout').hidden=!on}

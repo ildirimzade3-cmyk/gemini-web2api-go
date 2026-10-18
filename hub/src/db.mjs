@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS accounts (
   sleep_len_min INTEGER NOT NULL,
   last_open_at INTEGER NOT NULL DEFAULT 0,
   last_job_at INTEGER NOT NULL DEFAULT 0,
-  usage TEXT NOT NULL DEFAULT '{}'        -- Gemini's own usage meter, read from /usage
+  usage TEXT NOT NULL DEFAULT '{}',       -- Gemini's own usage meter, read from /usage
+  cooldown_until INTEGER NOT NULL DEFAULT 0  -- Google rate-limited the account (HTTP 429): no use before this
 );
 CREATE TABLE IF NOT EXISTS apps (
   id TEXT PRIMARY KEY,
@@ -82,6 +83,7 @@ export class Store {
     // Migrations for databases created by earlier versions.
     const cols = this.db.prepare('PRAGMA table_info(accounts)').all().map((c) => c.name);
     if (!cols.includes('usage')) this.db.exec("ALTER TABLE accounts ADD COLUMN usage TEXT NOT NULL DEFAULT '{}'");
+    if (!cols.includes('cooldown_until')) this.db.exec('ALTER TABLE accounts ADD COLUMN cooldown_until INTEGER NOT NULL DEFAULT 0');
     if (file !== ':memory:') fs.chmodSync(file, 0o600);
   }
 

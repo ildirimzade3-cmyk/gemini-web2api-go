@@ -164,7 +164,7 @@ test('happy path: text, model, account, usage with prompts=1, rest after answer'
   assert.equal(rows[0].out_chars, 'answer from a1'.length);
   await settle();
   assert.equal(h.runtimes.a1.busy, false);
-  assert.ok(h.runtimes.a1.restUntil - Date.now() >= 5000, 'account rests after an answer');
+  assert.ok(h.runtimes.a1.restUntil - Date.now() >= 1500, 'account rests after an answer');
   assert.equal(h.store.account('a1').last_job_at > 0, true);
 });
 
@@ -228,6 +228,20 @@ test('limit error BEFORE send moves the job to the second account', async (t) =>
   await settle();
   const rows = usageRows(h.store);
   assert.deepEqual(rows.map((x) => [x.account_id, x.status, x.code, x.prompts]), [['a1', 'error', 'limit', 0], ['a2', 'ok', '', 1]]);
+});
+
+test('Google HTTP 429 before send: the account cools down by itself (not "needs you") and another serves', async (t) => {
+  const h = harness(t, {
+    accounts: 2,
+    hooks: { a1: { newChat: () => { throw new UiError('throttled', 'gemini.google.com answered HTTP 429', { sent: false }); } } },
+  });
+  const r = await h.scheduler.submit(h.req());
+  assert.equal(r.account, 'a2');
+  const a1 = h.store.account('a1');
+  assert.equal(a1.state, 'ready');
+  assert.ok(a1.cooldown_until - Date.now() > 2.9 * 3_600_000);
+  assert.ok(h.alerts.calls.some((c) => c.key === 'throttled:a1'));
+  assert.ok(h.scheduler.accountStatus(a1, { id: MODEL_ID, label: '3.1 Pro' }).blockers.includes('cooldown'));
 });
 
 test('limit error AFTER send -> 429 account_limit and the prompt is never resent', async (t) => {

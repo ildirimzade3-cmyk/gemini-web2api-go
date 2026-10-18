@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { AccountRuntime } from './account.mjs';
 import { SelectorBook, UiError, ATTACH_THRESHOLD_BYTES, ATTACHED_PROMPT_INSTRUCTION } from './ui.mjs';
-import { budgetFor, hourlyCap, meterState, modelClass, modelId, restAfterMs, restState, UNKNOWN_RESET_MS, defaultSleep } from './policy.mjs';
+import { budgetFor, cooldownMs, hourlyCap, meterState, modelClass, modelId, restAfterMs, restState, UNKNOWN_RESET_MS, defaultSleep } from './policy.mjs';
 import { judgeJson } from './prompt.mjs';
 
 const DAY = 86_400_000;
@@ -206,6 +206,7 @@ export class Scheduler {
     if (account.state !== 'ready') blockers.push(account.state);
     if (rest.resting) blockers.push('resting');
     if (lim?.exhausted_until > now) blockers.push('limit');
+    if (account.cooldown_until > now) blockers.push('cooldown');
     const meter = meterState(account, this.config.usageStop ?? {}, now);
     blockers.push(...meter.blockers);
     // Gemini meters compute, not prompts: with a fresh meter reading the count budget is only advisory.
@@ -234,7 +235,7 @@ export class Scheduler {
     return this.store.accounts().map((a) => {
       const meter = meterState(a, this.config.usageStop ?? {}, now);
       const rest = restState(a, now);
-      const reasons = [...(a.state !== 'ready' ? [a.state] : []), ...meter.blockers, ...(rest.resting ? ['resting'] : [])];
+      const reasons = [...(a.state !== 'ready' ? [a.state] : []), ...(a.cooldown_until > now ? ['cooldown'] : []), ...meter.blockers, ...(rest.resting ? ['resting'] : [])];
       return {
         account: a.id,
         label: a.label,
@@ -250,7 +251,7 @@ export class Scheduler {
         },
         available: reasons.length === 0,
         unavailable_reasons: reasons,
-        available_again_at: meter.until ? new Date(meter.until).toISOString() : rest.until ? new Date(rest.until).toISOString() : null,
+        available_again_at: a.cooldown_until > now ? new Date(a.cooldown_until).toISOString() : meter.until ? new Date(meter.until).toISOString() : rest.until ? new Date(rest.until).toISOString() : null,
       };
     });
   }
@@ -356,9 +357,9 @@ export class Scheduler {
     if (!usable.length) {
       return { ok: false, status: 503, code: 'no_account', message: `no healthy account offers ${model.label} right now (signed out, paused or waiting for the operator)`, retryAfter: 600 };
     }
-    const soon = usable.filter(({ s }) => !s.blockers.some((b) => ['limit', 'budget', 'usage_5h', 'usage_weekly'].includes(b)));
+    const soon = usable.filter(({ s }) => !s.blockers.some((b) => ['limit', 'budget', 'usage_5h', 'usage_weekly', 'cooldown'].includes(b)));
     if (!soon.length) {
-      const until = Math.min(...usable.map(({ s, a }) => s.meter.until || s.exhausted_until || this.#budgetFreesAt(a, model, now)));
+      const until = Math.min(...usable.map(({ s, a }) => (a.cooldown_until > now ? a.cooldown_until : 0) || s.meter.until || s.exhausted_until || this.#budgetFreesAt(a, model, now)));
       const why = usable
         .map(({ a, s }) => `${a.label}: ${s.blockers.filter((b) => b !== 'resting').join('+') || 'busy'}${s.meter.five_hour ? ` (5h ${s.meter.five_hour.used_pct}%, weekly ${s.meter.weekly?.used_pct ?? '?'}%)` : ''}`)
         .join('; ');
@@ -558,9 +559,9 @@ export class Scheduler {
       rt.lastUsed = Date.now();
       rt.restUntil = Date.now() + (prompts ? restAfterMs(outChars) : 2000);
       // During the rest a person might glance at the usage page: refresh the meter
-      // when it is older than 10 minutes (no cost to the caller, who already has the answer).
+      // when it is older than 30 minutes (no cost to the caller, who already has the answer).
       const acct = this.store.account(account.id);
-      if (prompts && acct?.state === 'ready' && Date.now() - (acct.usage?.read_at ?? 0) > 10 * 60_000) {
+      if (prompts && acct?.state === 'ready' && Date.now() - (acct.usage?.read_at ?? 0) > 30 * 60_000) {
         this.readUsage(account.id).catch((e) => this.log('usage_read_failed', { account: account.id, error: e.message }));
       }
       this.#tick().catch(() => {});
@@ -589,6 +590,20 @@ export class Scheduler {
           accountId: id,
         });
         return sent ? fail(429, 'account_limit', 'the account reached a Gemini limit while answering; the prompt is not resent') : requeue();
+      }
+      case 'throttled': {
+        // Google's rate limit, not a check: the account rests and comes back by itself.
+        const until = now + cooldownMs(account.cooldown_until, now);
+        this.store.updateAccount(id, { cooldown_until: until });
+        this.store.event('warn', 'account_throttled', id, { until, message: err.message });
+        await rt.close('throttled');
+        this.alerts.notify({
+          key: `throttled:${id}`,
+          title: `${account.label} slowed down by Google`,
+          message: `Google answered "too many requests" (HTTP 429). ${account.label} rests until ${new Date(until).toISOString()} and then resumes by itself. If this repeats, the load is too high for the accounts.`,
+          accountId: id,
+        });
+        return sent ? fail(429, 'account_throttled', 'Google rate-limited the account while answering; the prompt is not resent') : requeue();
       }
       case 'challenge':
       case 'signed_out': {

@@ -34,7 +34,7 @@ export const DEFAULT_SELECTORS = Object.freeze({
 });
 
 export class UiError extends Error {
-  /** code: ui_changed | signed_out | challenge | limit | model_unavailable | model_changed | generation_failed | browser_error */
+  /** code: ui_changed | signed_out | challenge | throttled | limit | model_unavailable | model_changed | generation_failed | browser_error */
   constructor(code, message, { sent = false, resetAt = null, role = null, diag = null } = {}) {
     super(message);
     Object.assign(this, { code, sent, resetAt, role, diag });
@@ -158,7 +158,7 @@ export class GeminiPage {
         throw new UiError('browser_error', `loading Gemini failed: ${e.message.split('\n')[0]}`);
       }
       const status = res?.status() ?? 0;
-      if (status === 429) throw new UiError('challenge', 'gemini.google.com answered HTTP 429');
+      if (status === 429) throw new UiError('throttled', 'gemini.google.com answered HTTP 429 (too many requests)');
       if (status >= 500) throw new UiError('browser_error', `gemini.google.com answered HTTP ${status}`);
     }
     await this.#checkPage(false);

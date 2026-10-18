@@ -132,6 +132,11 @@ TASKS = {
         lambda: {"messages": [{"role": "user", "content": long_doc() + "\n\nQuestion: what vault access code was chosen? Reply with the code only."}]},
         lambda t: "ZEBRA-7741" in t,
     ),
+    "auto": (
+        "openai", "gemini-auto",
+        lambda: {"messages": [{"role": "user", "content": "How many days are there in a leap year? Reply with the number only."}]},
+        lambda t: t.strip().rstrip(".") == "366",
+    ),
     "reasoning": (
         "gemini", "gemini-4-argon",
         lambda: {"contents": "A farmer has 17 sheep. All but 9 run away. Then he buys twice as many sheep as he has left. How many sheep does he have now? Reply with the number only."},

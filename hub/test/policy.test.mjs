@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_BUDGETS, budgetFor, modelClass, modelId, parseResetTime, restAfterMs, restState } from '../src/policy.mjs';
+import { DEFAULT_BUDGETS, budgetFor, cooldownMs, modelClass, modelId, parseResetTime, restAfterMs, restState } from '../src/policy.mjs';
 
 const HOUR = 3_600_000;
 const DAY = 86_400_000;
@@ -38,13 +38,13 @@ test('budgetFor: plan defaults, learned lowers, never raises', () => {
 });
 
 test('restAfterMs bounds with injected rnd', () => {
-  assert.equal(restAfterMs(0, () => 0), 6000);
-  assert.equal(restAfterMs(0, () => 1), 16000);
-  assert.equal(restAfterMs(1200, () => 0), 7000);
-  assert.equal(restAfterMs(10 ** 7, () => 1), 40000);
+  assert.equal(restAfterMs(0, () => 0), 2000);
+  assert.equal(restAfterMs(0, () => 1), 8000);
+  assert.equal(restAfterMs(2000, () => 0), 3000);
+  assert.equal(restAfterMs(10 ** 7, () => 1), 18000);
   for (let i = 0; i < 100; i++) {
     const v = restAfterMs(Math.random() * 5000);
-    assert.ok(v >= 6000 && v <= 40000, String(v));
+    assert.ok(v >= 2000 && v <= 18000, String(v));
   }
 });
 
@@ -105,4 +105,11 @@ test('parseResetTime', () => {
   assert.equal(parseResetTime('', now), null);
   assert.equal(parseResetTime(null, now), null);
   assert.equal(parseResetTime('until 25:00', now), null);
+});
+
+test('cooldownMs: 3 h, 12 h when Google rate-limits again within a day', () => {
+  const now = 10 * DAY;
+  assert.equal(cooldownMs(0, now), 3 * HOUR);
+  assert.equal(cooldownMs(now - HOUR, now), 12 * HOUR);
+  assert.equal(cooldownMs(now - 2 * DAY, now), 3 * HOUR);
 });
