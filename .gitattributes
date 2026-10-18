@@ -19,3 +19,6 @@
 *.tgz binary
 *.db binary
 *.sqlite binary
+hub/deploy/gemini-hub-* text eol=lf
+hub/**/*.mjs text eol=lf
+hub/Dockerfile text eol=lf
