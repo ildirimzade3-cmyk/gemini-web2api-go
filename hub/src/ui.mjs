@@ -316,19 +316,28 @@ export class GeminiPage {
   async setThinking(level) {
     const want = { low: 'Low', medium: 'Medium', high: 'High' }[level];
     if (!want) throw new UiError('ui_changed', `unknown thinking level ${level}`);
-    const openSub = async () => {
-      await this.#openPicker();
-      const trigger = this.page.locator('gem-menu-item[value="thinking_level"]').first();
-      if (!(await trigger.count())) return null;
-      await trigger.hover().catch(() => {});
-      await trigger.click({ timeout: 5000 }).catch(() => {});
-      const item = this.page.locator('gem-menu-item').filter({ has: this.page.locator('span.label', { hasText: new RegExp(`^\\s*${want}\\s*$`) }) }).first();
-      await item.waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
-      return (await item.count()) ? item : null;
-    };
     const close = async () => {
       await this.page.keyboard.press('Escape').catch(() => {});
       await this.page.keyboard.press('Escape').catch(() => {});
+    };
+    // Returns the visible level item, or null when the model has no "Thinking level" submenu.
+    // The submenu sometimes does not open on the first hover/click: try a second time.
+    const openSub = async () => {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await this.#openPicker();
+        const trigger = this.page.locator('gem-menu-item[value="thinking_level"]').first();
+        if (!(await trigger.count())) return null;
+        await trigger.hover().catch(() => {});
+        await trigger.click({ timeout: 5000 }).catch(() => {});
+        const item = this.page
+          .locator('gem-menu-item')
+          .filter({ has: this.page.locator('span.label', { hasText: new RegExp(`^\\s*${want}\\s*$`) }), visible: true })
+          .first();
+        if (await item.waitFor({ state: 'visible', timeout: 5000 }).then(() => true, () => false)) return item;
+        await close();
+        await sleep(600);
+      }
+      throw new UiError('ui_changed', `the "Thinking level" submenu did not show ${want}`, { role: 'picker' });
     };
     const selected = async (item) => /\bselected\b/.test((await item.getAttribute('class').catch(() => '')) || '');
     let item = await openSub();
@@ -446,6 +455,7 @@ export class GeminiPage {
   async send({ files = false } = {}) {
     const before = await this.#counts();
     this.responsesBefore = await this.page.evaluate(() => document.querySelectorAll('model-response').length).catch(() => 0);
+    this.sentAt = Date.now();
     for (let attempt = 0; attempt < 2; attempt++) {
       // With files the button stays disabled until the upload finished; without, 8 s is plenty.
       const btn = await this.#first('send', { timeout: attempt ? 2000 : files ? 120_000 : 8000 });
@@ -456,7 +466,10 @@ export class GeminiPage {
         await sleep(250);
         const c = await this.#counts().catch(() => before);
         const st = await this.#state().catch(() => null);
-        if (c.user > before.user || c.answer > before.answer || st?.stop) return;
+        if (c.user > before.user || c.answer > before.answer || st?.stop) {
+          this.sentUser = c.user;
+          return;
+        }
       }
       const box = await this.#first('input', { timeout: 1000 });
       const stillThere = box && norm(await box.el.innerText().catch(() => '')).length > 0;
@@ -478,6 +491,7 @@ export class GeminiPage {
     let stableSince = 0;
     let noAnswerSince = Date.now();
     let triedRepair = false;
+    let sawQuestion = (this.sentUser ?? 0) > 0;
     for (;;) {
       await this.#checkPage(true);
       await this.#scanAlerts(true);
@@ -491,6 +505,14 @@ export class GeminiPage {
         continue;
       }
       if (!st.found && !st.stop) {
+        // Google sometimes gives up on a generation and resets the chat: our question is
+        // gone and the empty start page is back. That is not a page change: no repair.
+        const turns = await this.#counts().catch(() => null);
+        if (turns?.user) sawQuestion = true;
+        if (sawQuestion && turns?.user === 0 && st.responses === 0) {
+          const secs = Math.round((now - (this.sentAt ?? now)) / 1000);
+          throw new UiError('generation_failed', `Gemini reset the chat without answering after ${secs} s (a Google-side failure); the prompt is not resent — try again`, { sent: true });
+        }
         if (now - noAnswerSince > (triedRepair ? 90_000 : 45_000)) {
           if (this.repairKey && !triedRepair) {
             triedRepair = true;

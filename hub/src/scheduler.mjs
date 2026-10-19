@@ -575,6 +575,7 @@ export class Scheduler {
       const err = e instanceof UiError ? e : new UiError('browser_error', e.message.split('\n')[0]);
       if (err.sent) sent = true;
       if (!sent) prompts = 0;
+      err.steps = steps;
       await this.#onFailure(job, account, rt, err, sent);
       usage('error', err.code);
     } finally {
@@ -607,7 +608,7 @@ export class Scheduler {
   async #onFailure(job, account, rt, err, sent) {
     const now = Date.now();
     const id = account.id;
-    this.log('job_failed', { account: id, code: err.code, sent, message: err.message });
+    this.log('job_failed', { account: id, model: job.model.id, code: err.code, sent, message: err.message, steps: err.steps });
     const requeue = () => {
       job.tried.add(id);
       this.queue.unshift(job);
