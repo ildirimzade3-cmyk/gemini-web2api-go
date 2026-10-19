@@ -511,7 +511,9 @@ export class GeminiPage {
         if (turns?.user) sawQuestion = true;
         if (sawQuestion && turns?.user === 0 && st.responses === 0) {
           const secs = Math.round((now - (this.sentAt ?? now)) / 1000);
-          throw new UiError('generation_failed', `Gemini reset the chat without answering after ${secs} s (a Google-side failure); the prompt is not resent — try again`, { sent: true });
+          const e = new UiError('generation_failed', `Gemini reset the chat without answering after ${secs} s (a Google-side failure); the prompt is not resent — try again`, { sent: true });
+          e.dropped = true;
+          throw e;
         }
         if (now - noAnswerSince > (triedRepair ? 90_000 : 45_000)) {
           if (this.repairKey && !triedRepair) {

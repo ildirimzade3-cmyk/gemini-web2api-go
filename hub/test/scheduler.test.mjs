@@ -266,6 +266,25 @@ test('three Google HTTP 429s within 10 minutes pause the account for 5 minutes',
   assert.ok(h.scheduler.accountStatus(a1, { id: MODEL_ID, label: '3.1 Pro' }).blockers.includes('cooldown'));
 });
 
+test('a chat Google drops without an answer -> 502 at once, no resend; the second within 30 min pauses the account', async (t) => {
+  const dropped = () => {
+    const e = new UiError('generation_failed', 'Gemini reset the chat without answering after 220 s', { sent: true });
+    e.dropped = true;
+    throw e;
+  };
+  const h = harness(t, { accounts: 1, hooks: { a1: { waitAnswer: dropped } } });
+  await rejectsWith(h.scheduler.submit(h.req()), 502, 'generation_failed');
+  await settle();
+  assert.equal(h.pages.a1.sends, 1);
+  assert.equal(h.store.account('a1').cooldown_until, 0);
+  h.runtimes.a1.restUntil = 0;
+  await rejectsWith(h.scheduler.submit(h.req({ prompt: { text: 'another question', files: [] } })), 502, 'generation_failed');
+  assert.equal(h.pages.a1.sends, 2);
+  const a1 = h.store.account('a1');
+  assert.ok(a1.cooldown_until - Date.now() > 4.9 * 60_000);
+  assert.ok(h.alerts.calls.some((c) => c.key === 'dropped:a1'));
+});
+
 test('limit error AFTER send -> 429 account_limit and the prompt is never resent', async (t) => {
   const h = harness(t, {
     accounts: 2,

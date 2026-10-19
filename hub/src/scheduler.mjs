@@ -690,8 +690,26 @@ export class Scheduler {
         if (!sent && job.tried.size === 0) return requeue();
         return fail(503, 'upstream_ui_changed', `the Gemini web app changed (${err.role}); ${sent ? 'the prompt may have been sent and is not resent' : 'nothing was sent'}`);
       }
-      case 'generation_failed':
+      case 'generation_failed': {
+        // A chat Google dropped without an answer is a quiet "slow down" when it repeats:
+        // two within 30 minutes pause the account like three 429s do.
+        if (err.dropped) {
+          const drops = (rt.drops = [...(rt.drops ?? []).filter((t) => now - t < 30 * 60_000), now]);
+          this.store.event('warn', 'answer_dropped', id, { model: job.model.id, count_30min: drops.length, message: err.message });
+          if (drops.length >= 2) {
+            const until = now + cooldownMs(account.cooldown_until, now);
+            this.store.updateAccount(id, { cooldown_until: until });
+            rt.drops = [];
+            this.alerts.notify({
+              key: `dropped:${id}`,
+              title: `${account.label}: Gemini stopped answering`,
+              message: `Gemini reset two chats in 30 minutes without an answer. ${account.label} pauses until ${new Date(until).toISOString()} and then resumes by itself.`,
+              accountId: id,
+            });
+          }
+        }
         return fail(502, 'generation_failed', err.message);
+      }
       default:
         await rt.close('error');
         if (!sent && job.tried.size < 2) return requeue();
